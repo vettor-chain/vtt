@@ -1,0 +1,11 @@
+[package]
+name = "vtt-telemetry"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Telemetry and metrics for VTT blockchain nodes"
+
+[dependencies]
+prometheus = { workspace = true }
+tracing = { workspace = true }

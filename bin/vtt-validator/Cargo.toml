@@ -1,0 +1,12 @@
+[package]
+name = "vtt-validator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vtt-validator"
+path = "src/main.rs"
+
+[dependencies]

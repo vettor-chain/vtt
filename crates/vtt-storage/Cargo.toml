@@ -1,0 +1,15 @@
+[package]
+name = "vtt-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Storage abstraction layer for VTT: KeyValueStore trait with RocksDB and InMemory backends"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+rocksdb = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

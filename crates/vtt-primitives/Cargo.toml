@@ -1,0 +1,16 @@
+[package]
+name = "vtt-primitives"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core types for the VTT blockchain: hashes, addresses, amounts, and identifiers"
+
+[dependencies]
+serde = { workspace = true }
+borsh = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+serde_json = { workspace = true }

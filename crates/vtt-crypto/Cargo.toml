@@ -1,0 +1,17 @@
+[package]
+name = "vtt-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cryptographic operations for VTT: BLAKE3 hashing, Ed25519 signing"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

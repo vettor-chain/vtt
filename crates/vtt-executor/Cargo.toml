@@ -1,0 +1,15 @@
+[package]
+name = "vtt-executor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Transaction execution engine for VTT blockchain"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+vtt-state = { workspace = true }
+borsh = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

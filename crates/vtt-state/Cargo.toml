@@ -1,0 +1,18 @@
+[package]
+name = "vtt-state"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "State management for VTT: account state, state trie, and state database"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+vtt-storage = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
