@@ -4,5 +4,15 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "WASM virtual machine for VTT smart contracts"
 
 [dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+wasmer = { workspace = true }
+borsh = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+wat = "1"

@@ -5,7 +5,8 @@ use vtt_crypto::{blake3_hash, verify};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::chain::GasConfig;
 use vtt_primitives::transaction::{Log, SignedTransaction, TransactionAction, TransactionReceipt};
-use vtt_primitives::{Address, H256};
+use vtt_primitives::{Address, ChainId, H256};
+use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus};
 use vtt_state::StateDB;
 
 #[derive(Debug, Error)]
@@ -204,10 +205,35 @@ fn execute_action(
             Err(ExecutionError::ContractNotSupported)
         }
 
-        TransactionAction::CreateAssetClass { .. }
-        | TransactionAction::AssetTransfer { .. }
-        | TransactionAction::CrossChainTransfer { .. } => {
-            // These will be implemented in Phase 2
+        TransactionAction::CreateAssetClass {
+            name,
+            symbol,
+            metadata_uri,
+            total_supply,
+        } => {
+            execute_create_asset(state, sender, name, symbol, metadata_uri, *total_supply)?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"CreateAssetClass")],
+                data: borsh::to_vec(&(sender, name, symbol)).unwrap(),
+            }])
+        }
+
+        TransactionAction::AssetTransfer {
+            asset_id,
+            to,
+            amount,
+        } => {
+            state.transfer_asset(asset_id, sender, to, *amount)?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"AssetTransfer"), *asset_id],
+                data: borsh::to_vec(&(*sender, *to, *amount)).unwrap(),
+            }])
+        }
+
+        TransactionAction::CrossChainTransfer { .. } => {
+            // Cross-chain will be implemented in Phase 3
             Err(ExecutionError::ContractNotSupported)
         }
     }
@@ -319,6 +345,46 @@ fn execute_unstake(
 
     // Return VTT to sender (in production this goes through unbonding period)
     state.add_balance(sender, amount)?;
+
+    Ok(())
+}
+
+/// Execute asset creation.
+fn execute_create_asset(
+    state: &mut StateDB,
+    sender: &Address,
+    name: &str,
+    symbol: &str,
+    metadata_uri: &str,
+    total_supply: Amount,
+) -> Result<(), ExecutionError> {
+    // Generate a deterministic asset ID from sender + name + symbol
+    let id_data = borsh::to_vec(&(*sender, name, symbol)).unwrap();
+    let asset_id = blake3_hash(&id_data);
+
+    let asset = AssetRecord {
+        id: asset_id,
+        name: name.to_string(),
+        symbol: symbol.to_string(),
+        class: AssetClass::Custom("General".to_string()),
+        origin_chain: ChainId::RELAY,
+        issuer: *sender,
+        total_supply,
+        decimals: 18,
+        status: AssetStatus::Active,
+        compliance_policy: None,
+        valuation_oracle: None,
+        documents: std::collections::BTreeMap::new(),
+        metadata_uri: metadata_uri.to_string(),
+        created_at: 0,
+    };
+
+    state.register_asset(asset)?;
+
+    // Mint total supply to issuer
+    let mut ownership = state.get_ownership(&asset_id, sender);
+    ownership.credit(total_supply);
+    state.put_ownership(ownership);
 
     Ok(())
 }

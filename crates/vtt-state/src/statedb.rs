@@ -6,6 +6,7 @@ use vtt_primitives::amount::Amount;
 use vtt_primitives::{Address, H256};
 
 use crate::account::AccountState;
+use crate::asset::{AssetRecord, OwnershipRecord};
 use crate::trie::StateTrie;
 
 #[derive(Debug, Error)]
@@ -27,10 +28,16 @@ pub type Result<T> = std::result::Result<T, StateError>;
 pub struct StateDB {
     /// In-memory account cache / overlay.
     accounts: HashMap<Address, AccountState>,
+    /// Asset registry: asset_id -> AssetRecord.
+    assets: HashMap<H256, AssetRecord>,
+    /// Ownership records: (asset_id, owner) -> OwnershipRecord.
+    ownership: HashMap<(H256, Address), OwnershipRecord>,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
     dirty: Vec<Address>,
+    /// Tracks which assets have been modified.
+    dirty_assets: Vec<H256>,
 }
 
 impl StateDB {
@@ -38,8 +45,11 @@ impl StateDB {
     pub fn new() -> Self {
         Self {
             accounts: HashMap::new(),
+            assets: HashMap::new(),
+            ownership: HashMap::new(),
             trie: StateTrie::new(),
             dirty: Vec::new(),
+            dirty_assets: Vec::new(),
         }
     }
 
@@ -128,7 +138,104 @@ impl StateDB {
         old_nonce
     }
 
-    /// Compute the state root by flushing dirty accounts into the trie.
+    // --- Asset Registry Methods ---
+
+    /// Register a new asset. Returns error if asset ID already exists.
+    pub fn register_asset(&mut self, asset: AssetRecord) -> Result<()> {
+        if self.assets.contains_key(&asset.id) {
+            return Err(StateError::Serialization(format!(
+                "asset already exists: {}",
+                asset.id
+            )));
+        }
+        self.dirty_assets.push(asset.id);
+        self.assets.insert(asset.id, asset);
+        Ok(())
+    }
+
+    /// Get an asset record by ID.
+    pub fn get_asset(&self, asset_id: &H256) -> Option<&AssetRecord> {
+        self.assets.get(asset_id)
+    }
+
+    /// Get a mutable asset record by ID.
+    pub fn get_asset_mut(&mut self, asset_id: &H256) -> Option<&mut AssetRecord> {
+        if let Some(asset) = self.assets.get_mut(asset_id) {
+            self.dirty_assets.push(*asset_id);
+            Some(asset)
+        } else {
+            None
+        }
+    }
+
+    /// Get ownership record for an (asset, owner) pair.
+    pub fn get_ownership(&self, asset_id: &H256, owner: &Address) -> OwnershipRecord {
+        self.ownership
+            .get(&(*asset_id, *owner))
+            .cloned()
+            .unwrap_or_else(|| OwnershipRecord::new(*asset_id, *owner))
+    }
+
+    /// Set ownership record.
+    pub fn put_ownership(&mut self, record: OwnershipRecord) {
+        let key = (record.asset_id, record.owner);
+        self.dirty_assets.push(record.asset_id);
+        self.ownership.insert(key, record);
+    }
+
+    /// Transfer asset tokens between owners. Returns error if insufficient balance.
+    pub fn transfer_asset(
+        &mut self,
+        asset_id: &H256,
+        from: &Address,
+        to: &Address,
+        amount: Amount,
+    ) -> Result<()> {
+        if amount.is_zero() {
+            return Ok(());
+        }
+
+        // Check asset exists and is tradeable
+        let asset = self
+            .assets
+            .get(asset_id)
+            .ok_or_else(|| StateError::Serialization(format!("asset not found: {asset_id}")))?;
+        if !asset.is_tradeable() {
+            return Err(StateError::Serialization(format!(
+                "asset not tradeable: {}",
+                asset.status_str()
+            )));
+        }
+
+        // Debit sender
+        let mut from_record = self.get_ownership(asset_id, from);
+        if !from_record.debit(amount) {
+            return Err(StateError::InsufficientBalance {
+                have: from_record.available,
+                need: amount,
+            });
+        }
+        self.put_ownership(from_record);
+
+        // Credit recipient
+        let mut to_record = self.get_ownership(asset_id, to);
+        to_record.credit(amount);
+        self.put_ownership(to_record);
+
+        Ok(())
+    }
+
+    /// Get the number of registered assets.
+    pub fn asset_count(&self) -> usize {
+        self.assets.len()
+    }
+
+    /// Iterate over all assets.
+    pub fn iter_assets(&self) -> impl Iterator<Item = (&H256, &AssetRecord)> {
+        self.assets.iter()
+    }
+
+    /// Compute the state root by flushing dirty accounts and assets into the trie.
     pub fn compute_state_root(&mut self) -> H256 {
         for addr in self.dirty.drain(..) {
             if let Some(account) = self.accounts.get(&addr) {
@@ -141,6 +248,17 @@ impl StateDB {
                 }
             }
         }
+
+        // Flush dirty assets into the trie
+        for asset_id in self.dirty_assets.drain(..) {
+            if let Some(asset) = self.assets.get(&asset_id) {
+                let mut key = b"asset:".to_vec();
+                key.extend_from_slice(asset_id.as_bytes());
+                let value = borsh::to_vec(asset).expect("asset serialization failed");
+                self.trie.insert(key, value);
+            }
+        }
+
         self.trie.root()
     }
 
@@ -158,19 +276,28 @@ impl StateDB {
     pub fn snapshot(&self) -> StateSnapshot {
         StateSnapshot {
             accounts: self.accounts.clone(),
+            assets: self.assets.clone(),
+            ownership: self.ownership.clone(),
         }
     }
 
     /// Restore state from a snapshot.
     pub fn restore(&mut self, snapshot: StateSnapshot) {
-        // Mark all current and snapshot accounts as dirty
         for addr in self.accounts.keys() {
             self.dirty.push(*addr);
         }
         for addr in snapshot.accounts.keys() {
             self.dirty.push(*addr);
         }
+        for id in self.assets.keys() {
+            self.dirty_assets.push(*id);
+        }
+        for id in snapshot.assets.keys() {
+            self.dirty_assets.push(*id);
+        }
         self.accounts = snapshot.accounts;
+        self.assets = snapshot.assets;
+        self.ownership = snapshot.ownership;
     }
 }
 
@@ -184,6 +311,8 @@ impl Default for StateDB {
 #[derive(Clone)]
 pub struct StateSnapshot {
     accounts: HashMap<Address, AccountState>,
+    assets: HashMap<H256, AssetRecord>,
+    ownership: HashMap<(H256, Address), OwnershipRecord>,
 }
 
 #[cfg(test)]

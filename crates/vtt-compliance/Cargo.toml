@@ -4,5 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Identity, KYC/AML, and compliance layer for VTT blockchain"
 
 [dependencies]
+vtt-primitives = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
