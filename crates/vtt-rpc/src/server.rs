@@ -13,7 +13,10 @@ use vtt_primitives::amount::Amount;
 use vtt_primitives::{Address, BlockNumber, H256};
 use vtt_txpool::TxPool;
 
-use crate::types::{AccountInfo, BlockInfo, ChainStatus, ValidatorInfoRpc};
+use crate::types::{
+    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, OracleFeedInfo,
+    ValidatorInfoRpc,
+};
 
 /// JSON-RPC API definition for VTT.
 #[rpc(server)]
@@ -52,6 +55,26 @@ pub trait VttApi {
     /// Get the transaction pool size.
     #[method(name = "vtt_txPoolSize")]
     async fn tx_pool_size(&self) -> Result<usize, ErrorObjectOwned>;
+
+    /// Get asset info by ID.
+    #[method(name = "vtt_getAsset")]
+    async fn get_asset(&self, asset_id: H256) -> Result<Option<AssetInfo>, ErrorObjectOwned>;
+
+    /// Get asset balance for an address.
+    #[method(name = "vtt_getAssetBalance")]
+    async fn get_asset_balance(
+        &self,
+        asset_id: H256,
+        address: Address,
+    ) -> Result<AssetBalanceInfo, ErrorObjectOwned>;
+
+    /// List all registered assets.
+    #[method(name = "vtt_listAssets")]
+    async fn list_assets(&self) -> Result<Vec<AssetInfo>, ErrorObjectOwned>;
+
+    /// Get oracle feed info.
+    #[method(name = "vtt_getOracle")]
+    async fn get_oracle(&self, feed_id: H256) -> Result<Option<OracleFeedInfo>, ErrorObjectOwned>;
 }
 
 /// Shared state accessible by RPC handlers.
@@ -139,6 +162,63 @@ impl VttApiServer for VttRpcImpl {
     async fn tx_pool_size(&self) -> Result<usize, ErrorObjectOwned> {
         let pool = self.state.txpool.read().unwrap();
         Ok(pool.len())
+    }
+
+    async fn get_asset(&self, asset_id: H256) -> Result<Option<AssetInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        Ok(chain.state().get_asset(&asset_id).map(|a| AssetInfo {
+            id: a.id,
+            name: a.name.clone(),
+            symbol: a.symbol.clone(),
+            issuer: a.issuer,
+            total_supply: a.total_supply,
+            status: a.status_str().to_string(),
+            decimals: a.decimals,
+        }))
+    }
+
+    async fn get_asset_balance(
+        &self,
+        asset_id: H256,
+        address: Address,
+    ) -> Result<AssetBalanceInfo, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let record = chain.state().get_ownership(&asset_id, &address);
+        Ok(AssetBalanceInfo {
+            asset_id,
+            owner: address,
+            available: record.available,
+            locked: record.locked,
+        })
+    }
+
+    async fn list_assets(&self) -> Result<Vec<AssetInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        Ok(chain
+            .state()
+            .iter_assets()
+            .map(|(_, a)| AssetInfo {
+                id: a.id,
+                name: a.name.clone(),
+                symbol: a.symbol.clone(),
+                issuer: a.issuer,
+                total_supply: a.total_supply,
+                status: a.status_str().to_string(),
+                decimals: a.decimals,
+            })
+            .collect())
+    }
+
+    async fn get_oracle(&self, feed_id: H256) -> Result<Option<OracleFeedInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        Ok(chain.state().get_oracle(&feed_id).map(|f| OracleFeedInfo {
+            feed_id: f.feed_id,
+            name: f.name.clone(),
+            latest_value: f.latest_value,
+            updated_at: f.updated_at,
+            quorum: f.quorum,
+            sources: f.authorized_sources.len(),
+        }))
     }
 }
 

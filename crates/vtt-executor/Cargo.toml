@@ -10,6 +10,7 @@ description = "Transaction execution engine for VTT blockchain"
 vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-state = { workspace = true }
+vtt-vm = { workspace = true }
 borsh = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

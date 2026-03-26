@@ -6,8 +6,11 @@ use vtt_primitives::amount::Amount;
 use vtt_primitives::chain::GasConfig;
 use vtt_primitives::transaction::{Log, SignedTransaction, TransactionAction, TransactionReceipt};
 use vtt_primitives::{Address, ChainId, H256};
+use vtt_state::account::AccountState;
 use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus};
 use vtt_state::StateDB;
+use vtt_vm::context::{ExecutionContext, ExecutionParams};
+use vtt_vm::VmEngine;
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {
@@ -201,9 +204,16 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::DeployContract { .. } | TransactionAction::CallContract { .. } => {
-            Err(ExecutionError::ContractNotSupported)
+        TransactionAction::DeployContract { code, init_data: _ } => {
+            execute_deploy_contract(state, sender, code)
         }
+
+        TransactionAction::CallContract {
+            contract,
+            method,
+            args,
+            value,
+        } => execute_call_contract(state, sender, contract, method, args, *value),
 
         TransactionAction::CreateAssetClass {
             name,
@@ -347,6 +357,114 @@ fn execute_unstake(
     state.add_balance(sender, amount)?;
 
     Ok(())
+}
+
+/// Execute contract deployment.
+fn execute_deploy_contract(
+    state: &mut StateDB,
+    sender: &Address,
+    code: &[u8],
+) -> Result<Vec<Log>, ExecutionError> {
+    let engine = VmEngine::new();
+
+    // Validate the WASM bytecode compiles
+    engine
+        .compile(code)
+        .map_err(|_| ExecutionError::ContractNotSupported)?;
+
+    // Store the code and compute the code hash
+    let code_hash = state.store_code(code.to_vec());
+
+    // Derive contract address from sender + nonce
+    let nonce = state.get_nonce(sender);
+    let addr_data = borsh::to_vec(&(*sender, nonce)).unwrap();
+    let contract_addr_hash = blake3_hash(&addr_data);
+    let contract_addr = Address::from_slice(&contract_addr_hash.as_bytes()[12..32]);
+
+    // Create contract account
+    let contract_account = AccountState {
+        nonce: 0,
+        balance: Amount::ZERO,
+        code_hash: Some(code_hash),
+        storage_root: vtt_primitives::H256::ZERO,
+        staking: None,
+    };
+    state.put_account(contract_addr, contract_account);
+
+    debug!(
+        ?contract_addr,
+        ?code_hash,
+        code_size = code.len(),
+        "contract deployed"
+    );
+
+    Ok(vec![Log {
+        address: contract_addr,
+        topics: vec![blake3_hash(b"ContractDeployed")],
+        data: borsh::to_vec(&(contract_addr, code_hash)).unwrap(),
+    }])
+}
+
+/// Execute a contract call.
+fn execute_call_contract(
+    state: &mut StateDB,
+    sender: &Address,
+    contract: &Address,
+    method: &str,
+    args: &[u8],
+    value: Amount,
+) -> Result<Vec<Log>, ExecutionError> {
+    let contract_account = state.get_account(contract);
+    let code_hash = contract_account
+        .code_hash
+        .ok_or(ExecutionError::ContractNotSupported)?;
+
+    let code = state
+        .get_code(&code_hash)
+        .ok_or(ExecutionError::ContractNotSupported)?
+        .clone();
+
+    // Transfer value to contract if any
+    if !value.is_zero() {
+        state.transfer(sender, contract, value)?;
+    }
+
+    let mut engine = VmEngine::new();
+    let ctx = ExecutionContext::new(ExecutionParams {
+        contract_address: *contract,
+        caller: *sender,
+        origin: *sender,
+        value,
+        block_number: 0, // TODO: pass actual block number
+        block_timestamp: 0,
+        chain_id: vtt_primitives::ChainId::RELAY,
+        gas_limit: 1_000_000,
+    });
+
+    let result = engine
+        .execute(&code, method, args, ctx.clone())
+        .map_err(|e| {
+            ExecutionError::State(vtt_state::statedb::StateError::Serialization(e.to_string()))
+        })?;
+
+    if result.status != 0 {
+        return Err(ExecutionError::State(
+            vtt_state::statedb::StateError::Serialization(format!(
+                "contract reverted with status {}",
+                result.status
+            )),
+        ));
+    }
+
+    // Collect logs from execution context
+    let mut logs = ctx.take_logs();
+    logs.push(Log {
+        address: *contract,
+        topics: vec![blake3_hash(b"ContractCall")],
+        data: borsh::to_vec(&(*sender, *contract, method)).unwrap(),
+    });
+
+    Ok(logs)
 }
 
 /// Execute asset creation.

@@ -89,6 +89,38 @@ impl From<&TransactionReceipt> for ReceiptInfo {
     }
 }
 
+/// RPC response for asset info.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetInfo {
+    pub id: H256,
+    pub name: String,
+    pub symbol: String,
+    pub issuer: Address,
+    pub total_supply: Amount,
+    pub status: String,
+    pub decimals: u8,
+}
+
+/// RPC response for asset balance.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetBalanceInfo {
+    pub asset_id: H256,
+    pub owner: Address,
+    pub available: Amount,
+    pub locked: Amount,
+}
+
+/// RPC response for oracle feed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OracleFeedInfo {
+    pub feed_id: H256,
+    pub name: String,
+    pub latest_value: Option<Amount>,
+    pub updated_at: u64,
+    pub quorum: u8,
+    pub sources: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

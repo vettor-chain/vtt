@@ -7,6 +7,7 @@ use vtt_primitives::{Address, H256};
 
 use crate::account::AccountState;
 use crate::asset::{AssetRecord, OwnershipRecord};
+use crate::oracle::OracleFeed;
 use crate::trie::StateTrie;
 
 #[derive(Debug, Error)]
@@ -32,6 +33,10 @@ pub struct StateDB {
     assets: HashMap<H256, AssetRecord>,
     /// Ownership records: (asset_id, owner) -> OwnershipRecord.
     ownership: HashMap<(H256, Address), OwnershipRecord>,
+    /// Oracle feeds: feed_id -> OracleFeed.
+    oracles: HashMap<H256, OracleFeed>,
+    /// Contract code storage: code_hash -> bytecode.
+    contract_code: HashMap<H256, Vec<u8>>,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
@@ -47,6 +52,8 @@ impl StateDB {
             accounts: HashMap::new(),
             assets: HashMap::new(),
             ownership: HashMap::new(),
+            oracles: HashMap::new(),
+            contract_code: HashMap::new(),
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -235,6 +242,49 @@ impl StateDB {
         self.assets.iter()
     }
 
+    // --- Oracle Methods ---
+
+    /// Register a new oracle feed.
+    pub fn register_oracle(&mut self, feed: OracleFeed) -> Result<()> {
+        if self.oracles.contains_key(&feed.feed_id) {
+            return Err(StateError::Serialization(format!(
+                "oracle feed already exists: {}",
+                feed.feed_id
+            )));
+        }
+        self.oracles.insert(feed.feed_id, feed);
+        Ok(())
+    }
+
+    /// Get an oracle feed by ID.
+    pub fn get_oracle(&self, feed_id: &H256) -> Option<&OracleFeed> {
+        self.oracles.get(feed_id)
+    }
+
+    /// Get a mutable oracle feed by ID.
+    pub fn get_oracle_mut(&mut self, feed_id: &H256) -> Option<&mut OracleFeed> {
+        self.oracles.get_mut(feed_id)
+    }
+
+    /// Number of registered oracle feeds.
+    pub fn oracle_count(&self) -> usize {
+        self.oracles.len()
+    }
+
+    // --- Contract Code Methods ---
+
+    /// Store contract bytecode. Returns the code hash.
+    pub fn store_code(&mut self, code: Vec<u8>) -> H256 {
+        let hash = vtt_crypto::blake3_hash(&code);
+        self.contract_code.insert(hash, code);
+        hash
+    }
+
+    /// Get contract bytecode by code hash.
+    pub fn get_code(&self, code_hash: &H256) -> Option<&Vec<u8>> {
+        self.contract_code.get(code_hash)
+    }
+
     /// Compute the state root by flushing dirty accounts and assets into the trie.
     pub fn compute_state_root(&mut self) -> H256 {
         for addr in self.dirty.drain(..) {
@@ -278,6 +328,8 @@ impl StateDB {
             accounts: self.accounts.clone(),
             assets: self.assets.clone(),
             ownership: self.ownership.clone(),
+            oracles: self.oracles.clone(),
+            contract_code: self.contract_code.clone(),
         }
     }
 
@@ -298,6 +350,8 @@ impl StateDB {
         self.accounts = snapshot.accounts;
         self.assets = snapshot.assets;
         self.ownership = snapshot.ownership;
+        self.oracles = snapshot.oracles;
+        self.contract_code = snapshot.contract_code;
     }
 }
 
@@ -313,6 +367,8 @@ pub struct StateSnapshot {
     accounts: HashMap<Address, AccountState>,
     assets: HashMap<H256, AssetRecord>,
     ownership: HashMap<(H256, Address), OwnershipRecord>,
+    oracles: HashMap<H256, OracleFeed>,
+    contract_code: HashMap<H256, Vec<u8>>,
 }
 
 #[cfg(test)]
