@@ -18,6 +18,7 @@ members = [
     "bin/vtt-node",
     "bin/vtt-validator",
     "bin/vtt-cli",
+    "tests/integration",
 ]
 resolver = "2"
 

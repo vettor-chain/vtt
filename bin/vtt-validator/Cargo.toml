@@ -4,9 +4,24 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "VTT blockchain validator node with block production"
 
 [[bin]]
 name = "vtt-validator"
 path = "src/main.rs"
 
 [dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+vtt-chain = { workspace = true }
+vtt-consensus = { workspace = true }
+vtt-executor = { workspace = true }
+vtt-network = { workspace = true }
+vtt-genesis = { workspace = true }
+vtt-txpool = { workspace = true }
+vtt-rpc = { workspace = true }
+tokio = { workspace = true }
+borsh = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = "0.4"

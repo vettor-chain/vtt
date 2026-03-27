@@ -1,0 +1,22 @@
+[package]
+name = "vtt-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[test]]
+name = "chain_lifecycle"
+path = "chain_lifecycle.rs"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+vtt-state = { workspace = true }
+vtt-executor = { workspace = true }
+vtt-consensus = { workspace = true }
+vtt-chain = { workspace = true }
+vtt-genesis = { workspace = true }
+vtt-txpool = { workspace = true }
+vtt-multichain = { workspace = true }
+vtt-compliance = { workspace = true }
+borsh = { workspace = true }

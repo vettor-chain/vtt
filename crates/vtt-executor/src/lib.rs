@@ -242,9 +242,38 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::CrossChainTransfer { .. } => {
-            // Cross-chain will be implemented in Phase 3
-            Err(ExecutionError::ContractNotSupported)
+        TransactionAction::CrossChainTransfer {
+            destination_chain,
+            to,
+            payload,
+        } => {
+            // Lock assets on source chain based on payload
+            match payload {
+                vtt_primitives::transaction::CrossChainPayload::VttTransfer { amount } => {
+                    // Lock VTT by deducting from sender
+                    state.sub_balance(sender, *amount)?;
+                }
+                vtt_primitives::transaction::CrossChainPayload::AssetTransfer {
+                    asset_id,
+                    amount,
+                } => {
+                    // Lock asset tokens by deducting from sender
+                    state.transfer_asset(asset_id, sender, &Address::ZERO, *amount)?;
+                }
+                vtt_primitives::transaction::CrossChainPayload::ContractCall { value, .. } => {
+                    if !value.is_zero() {
+                        state.sub_balance(sender, *value)?;
+                    }
+                }
+            }
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![
+                    blake3_hash(b"CrossChainTransfer"),
+                    blake3_hash(&borsh::to_vec(destination_chain).unwrap()),
+                ],
+                data: borsh::to_vec(&(*sender, *to, payload)).unwrap(),
+            }])
         }
     }
 }
