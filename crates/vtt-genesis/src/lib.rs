@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use vtt_crypto::{blake3_hash, merkle_root};
+use vtt_crypto::{blake3_hash, merkle_root, Keypair};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::block::{Block, BlockHeader};
 use vtt_primitives::chain::{ChainConfig, ConsensusParams, GasConfig};
@@ -39,10 +39,11 @@ pub struct GenesisValidator {
 impl GenesisConfig {
     /// Create a default genesis config for a development/test network.
     pub fn dev_default() -> Self {
-        let dev_addr_1 = Address::from([0x01; 20]);
-        let dev_addr_2 = Address::from([0x02; 20]);
-        let dev_addr_3 = Address::from([0x03; 20]);
-        let validator_addr = Address::from([0x10; 20]);
+        // Derive addresses from seeds (matching vtt-validator default seed)
+        let dev_addr_1 = Keypair::from_seed(&[0x01; 32]).address();
+        let dev_addr_2 = Keypair::from_seed(&[0x02; 32]).address();
+        let dev_addr_3 = Keypair::from_seed(&[0x03; 32]).address();
+        let validator_addr = Keypair::from_seed(&[0x10; 32]).address();
 
         Self {
             chain: ChainConfig {
@@ -185,7 +186,7 @@ mod tests {
         let config = GenesisConfig::dev_default();
         let result = build_genesis(&config);
 
-        let addr1 = Address::from([0x01; 20]);
+        let addr1 = Keypair::from_seed(&[0x01; 32]).address();
         assert_eq!(
             result.state.get_balance(&addr1),
             Amount::from_vtt(1_000_000)
@@ -197,7 +198,7 @@ mod tests {
         let config = GenesisConfig::dev_default();
         let result = build_genesis(&config);
 
-        let val_addr = Address::from([0x10; 20]);
+        let val_addr = Keypair::from_seed(&[0x10; 32]).address();
         let val_account = result.state.get_account(&val_addr);
 
         // Balance should be 500k - 100k stake = 400k

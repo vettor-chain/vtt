@@ -366,8 +366,9 @@ mod tests {
             .build(format!("http://{addr}"))
             .unwrap();
 
+        let dev_addr = vtt_crypto::Keypair::from_seed(&[0x01; 32]).address();
         let balance: Amount = client
-            .request("vtt_getBalance", rpc_params![Address::from([0x01; 20])])
+            .request("vtt_getBalance", rpc_params![dev_addr])
             .await
             .unwrap();
         assert_eq!(balance, Amount::from_vtt(1_000_000));
