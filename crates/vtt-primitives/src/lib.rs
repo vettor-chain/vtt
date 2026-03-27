@@ -10,20 +10,29 @@ use serde::{Deserialize, Serialize};
 
 /// 32-byte BLAKE3 hash used for block hashes, tx hashes, state roots, etc.
 #[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Default,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    PartialOrd,
-    Ord,
+    Clone, Copy, PartialEq, Eq, Hash, Default, BorshSerialize, BorshDeserialize, PartialOrd, Ord,
 )]
 pub struct H256(pub [u8; 32]);
+
+impl Serialize for H256 {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
+    }
+}
+
+impl<'de> Deserialize<'de> for H256 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as Deserialize>::deserialize(deserializer)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom("H256 must be 32 bytes"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
 
 impl H256 {
     pub const ZERO: Self = Self([0u8; 32]);
@@ -60,20 +69,29 @@ impl From<[u8; 32]> for H256 {
 
 /// 20-byte address derived from the last 20 bytes of BLAKE3(public_key).
 #[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Default,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
-    PartialOrd,
-    Ord,
+    Clone, Copy, PartialEq, Eq, Hash, Default, BorshSerialize, BorshDeserialize, PartialOrd, Ord,
 )]
 pub struct Address(pub [u8; 20]);
+
+impl Serialize for Address {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("0x{}", hex::encode(self.0)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Address {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as Deserialize>::deserialize(deserializer)?;
+        let s = s.strip_prefix("0x").unwrap_or(&s);
+        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        if bytes.len() != 20 {
+            return Err(serde::de::Error::custom("Address must be 20 bytes"));
+        }
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
 
 impl Address {
     pub const ZERO: Self = Self([0u8; 20]);

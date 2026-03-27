@@ -8,20 +8,23 @@ use serde::{Deserialize, Serialize};
 /// Stored as u128 to avoid floating point entirely.
 /// Max representable: ~340 * 10^18 VTT (more than enough).
 #[derive(
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    Serialize,
-    Deserialize,
-    BorshSerialize,
-    BorshDeserialize,
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, BorshSerialize, BorshDeserialize,
 )]
 pub struct Amount(pub u128);
+
+impl Serialize for Amount {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Amount {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = <String as Deserialize>::deserialize(deserializer)?;
+        let v: u128 = s.parse().map_err(serde::de::Error::custom)?;
+        Ok(Self(v))
+    }
+}
 
 impl Amount {
     pub const ZERO: Self = Self(0);
