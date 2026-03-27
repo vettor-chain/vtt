@@ -14,8 +14,8 @@ use vtt_primitives::{Address, BlockNumber, H256};
 use vtt_txpool::TxPool;
 
 use crate::types::{
-    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, OracleFeedInfo,
-    ValidatorInfoRpc,
+    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, DelegationInfo,
+    OracleFeedInfo, StakingInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -75,6 +75,17 @@ pub trait VttApi {
     /// Get oracle feed info.
     #[method(name = "vtt_getOracle")]
     async fn get_oracle(&self, feed_id: H256) -> Result<Option<OracleFeedInfo>, ErrorObjectOwned>;
+
+    /// Submit a signed transaction. Returns the transaction hash.
+    #[method(name = "vtt_sendTransaction")]
+    async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned>;
+
+    /// Get staking info for an address.
+    #[method(name = "vtt_getStakingInfo")]
+    async fn get_staking_info(
+        &self,
+        address: Address,
+    ) -> Result<Option<StakingInfo>, ErrorObjectOwned>;
 }
 
 /// Shared state accessible by RPC handlers.
@@ -218,6 +229,54 @@ impl VttApiServer for VttRpcImpl {
             updated_at: f.updated_at,
             quorum: f.quorum,
             sources: f.authorized_sources.len(),
+        }))
+    }
+
+    async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned> {
+        // Decode the hex-encoded signed transaction
+        let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid hex: {e}"), None::<()>)
+        })?;
+        let tx: vtt_primitives::transaction::SignedTransaction = borsh::from_slice(&tx_bytes)
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("invalid transaction: {e}"), None::<()>)
+            })?;
+
+        let tx_hash = blake3_hash(&tx.payload_bytes());
+
+        // Add to transaction pool
+        let sender = vtt_crypto::address_from_public_key(&tx.public_key);
+        let chain = self.state.chain.read().unwrap();
+        let account_nonce = chain.state().get_nonce(&sender);
+        drop(chain);
+
+        let mut pool = self.state.txpool.write().unwrap();
+        pool.add(tx, sender, account_nonce)
+            .map_err(|e| ErrorObjectOwned::owned(-32603, format!("pool error: {e}"), None::<()>))?;
+
+        Ok(tx_hash)
+    }
+
+    async fn get_staking_info(
+        &self,
+        address: Address,
+    ) -> Result<Option<StakingInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let account = chain.state().get_account(&address);
+        Ok(account.staking.map(|s| StakingInfo {
+            address,
+            self_stake: s.self_stake,
+            total_stake: s.total_stake,
+            commission_bps: s.commission_bps,
+            active: s.active,
+            delegations: s
+                .delegations
+                .iter()
+                .map(|d| DelegationInfo {
+                    delegator: d.delegator,
+                    amount: d.amount,
+                })
+                .collect(),
         }))
     }
 }

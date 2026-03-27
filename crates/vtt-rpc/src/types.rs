@@ -121,6 +121,51 @@ pub struct OracleFeedInfo {
     pub sources: usize,
 }
 
+/// RPC response for transaction info.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionInfo {
+    pub hash: H256,
+    pub block_number: BlockNumber,
+    pub from: Address,
+    pub nonce: u64,
+    pub action: String,
+    pub gas_price: Amount,
+    pub gas_limit: u64,
+}
+
+/// RPC response for staking info.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StakingInfo {
+    pub address: Address,
+    pub self_stake: Amount,
+    pub total_stake: Amount,
+    pub commission_bps: u16,
+    pub active: bool,
+    pub delegations: Vec<DelegationInfo>,
+}
+
+/// Delegation info within staking.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DelegationInfo {
+    pub delegator: Address,
+    pub amount: Amount,
+}
+
+/// RPC response for governance proposal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProposalInfo {
+    pub id: H256,
+    pub proposer: Address,
+    pub description: String,
+    pub action_type: String,
+    pub status: String,
+    pub votes_yes: Amount,
+    pub votes_no: Amount,
+    pub votes_abstain: Amount,
+    pub created_at: BlockNumber,
+    pub voting_end: BlockNumber,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

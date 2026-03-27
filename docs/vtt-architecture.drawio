@@ -1,0 +1,231 @@
+<mxfile host="app.diagrams.net" modified="2026-03-27T00:00:00.000Z" agent="VTT" version="21.0.0">
+  <diagram id="vtt-architecture" name="VTT Architecture">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="VTT (VETTOR) Blockchain Architecture" style="text;html=1;fontSize=24;fontStyle=1;align=center;verticalAlign=middle;fillColor=none;strokeColor=none;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="400" y="10" width="800" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== RELAY CHAIN ==================== -->
+        <mxCell id="relay-group" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;arcSize=8;dashed=0;" vertex="1" parent="1">
+          <mxGeometry x="340" y="80" width="920" height="340" as="geometry"/>
+        </mxCell>
+        <mxCell id="relay-title" value="RELAY CHAIN (Chain ID: 0)" style="text;html=1;fontSize=16;fontStyle=1;align=center;verticalAlign=top;fillColor=none;strokeColor=none;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="620" y="85" width="360" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Consensus Engine -->
+        <mxCell id="consensus" value="&lt;b&gt;DPoS Consensus&lt;/b&gt;&lt;br&gt;21 Validators&lt;br&gt;3s Block Time&lt;br&gt;1200 blocks/epoch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="120" width="160" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- BFT Finality -->
+        <mxCell id="finality" value="&lt;b&gt;BFT Finality&lt;/b&gt;&lt;br&gt;2/3+1 votes&lt;br&gt;Irreversible blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="225" width="160" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Governance -->
+        <mxCell id="governance" value="&lt;b&gt;Governance&lt;/b&gt;&lt;br&gt;Proposals &amp; Voting&lt;br&gt;33% quorum&lt;br&gt;Stake-weighted" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="310" width="160" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Executor -->
+        <mxCell id="executor" value="&lt;b&gt;Transaction Executor&lt;/b&gt;&lt;br&gt;Transfer | Stake | Deploy&lt;br&gt;CreateAsset | AssetTransfer&lt;br&gt;CrossChainTransfer | Vote" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="570" y="120" width="200" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- WASM VM -->
+        <mxCell id="vm" value="&lt;b&gt;WASM VM (wasmer)&lt;/b&gt;&lt;br&gt;Smart Contracts&lt;br&gt;Host Functions:&lt;br&gt;storage, compliance,&lt;br&gt;oracle, cross-chain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="570" y="225" width="200" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- State DB -->
+        <mxCell id="statedb" value="&lt;b&gt;State Database&lt;/b&gt;&lt;br&gt;Accounts &amp; Balances&lt;br&gt;Asset Registry&lt;br&gt;Oracle Feeds&lt;br&gt;Contract Code&lt;br&gt;Merkle Trie → State Root" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="810" y="120" width="200" height="110" as="geometry"/>
+        </mxCell>
+
+        <!-- Storage -->
+        <mxCell id="storage" value="&lt;b&gt;RocksDB&lt;/b&gt;&lt;br&gt;Block Headers&lt;br&gt;Block Bodies&lt;br&gt;Transactions&lt;br&gt;State Trie" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="810" y="250" width="200" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- Chain Registry -->
+        <mxCell id="registry" value="&lt;b&gt;Chain Registry&lt;/b&gt;&lt;br&gt;App Chain configs&lt;br&gt;Shared Security&lt;br&gt;Validator Assignment" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="120" width="180" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Cross-Chain Hub -->
+        <mxCell id="xcm" value="&lt;b&gt;Cross-Chain Hub&lt;/b&gt;&lt;br&gt;Message Outbox/Inbox&lt;br&gt;Merkle Proofs&lt;br&gt;Lock-Relay-Mint" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="230" width="180" height="90" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows inside relay -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;" edge="1" parent="1" source="consensus" target="executor">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;" edge="1" parent="1" source="executor" target="statedb">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;" edge="1" parent="1" source="executor" target="vm">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#666666;" edge="1" parent="1" source="statedb" target="storage">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== APP CHAINS ==================== -->
+        <!-- Real Estate Chain -->
+        <mxCell id="chain1" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6ffcc;strokeColor=#82b366;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="120" y="500" width="350" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="chain1-title" value="&lt;b&gt;REAL ESTATE CHAIN&lt;/b&gt;&lt;br&gt;Chain ID: 1" style="text;html=1;fontSize=14;fontStyle=0;align=center;verticalAlign=top;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="180" y="505" width="230" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1-compliance" value="&lt;b&gt;KYC Required&lt;/b&gt;&lt;br&gt;Accredited Investors&lt;br&gt;EU Jurisdiction Only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="140" y="545" width="150" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1-assets" value="&lt;b&gt;Assets&lt;/b&gt;&lt;br&gt;Property Tokens&lt;br&gt;Fractional Ownership&lt;br&gt;Legal Docs on-chain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="305" y="545" width="145" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1-validators" value="11 Validators (rotated from relay)" style="text;html=1;fontSize=10;align=center;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="140" y="620" width="310" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="c1-oracle" value="&lt;b&gt;Oracle&lt;/b&gt;&lt;br&gt;Property Valuations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="140" y="645" width="150" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Commodities Chain -->
+        <mxCell id="chain2" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="530" y="500" width="350" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="chain2-title" value="&lt;b&gt;COMMODITIES CHAIN&lt;/b&gt;&lt;br&gt;Chain ID: 2" style="text;html=1;fontSize=14;fontStyle=0;align=center;verticalAlign=top;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="590" y="505" width="230" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2-compliance" value="&lt;b&gt;Permissionless&lt;/b&gt;&lt;br&gt;No KYC&lt;br&gt;OFAC Blacklist Only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="545" width="150" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2-assets" value="&lt;b&gt;Assets&lt;/b&gt;&lt;br&gt;Gold, Oil, Grain&lt;br&gt;Carbon Credits" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="715" y="545" width="145" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2-validators" value="7 Validators (rotated from relay)" style="text;html=1;fontSize=10;align=center;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="550" y="620" width="310" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="c2-oracle" value="&lt;b&gt;Oracle&lt;/b&gt;&lt;br&gt;Market Prices" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="550" y="645" width="150" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Equity Chain -->
+        <mxCell id="chain3" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;arcSize=10;" vertex="1" parent="1">
+          <mxGeometry x="940" y="500" width="350" height="200" as="geometry"/>
+        </mxCell>
+        <mxCell id="chain3-title" value="&lt;b&gt;EQUITY CHAIN&lt;/b&gt;&lt;br&gt;Chain ID: 3" style="text;html=1;fontSize=14;fontStyle=0;align=center;verticalAlign=top;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="505" width="230" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3-compliance" value="&lt;b&gt;KYC Required&lt;/b&gt;&lt;br&gt;Reg D / Reg S&lt;br&gt;All Jurisdictions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="960" y="545" width="150" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3-assets" value="&lt;b&gt;Assets&lt;/b&gt;&lt;br&gt;Company Shares&lt;br&gt;Fund LP Tokens&lt;br&gt;Bonds" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1125" y="545" width="145" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="c3-validators" value="11 Validators (rotated from relay)" style="text;html=1;fontSize=10;align=center;fillColor=none;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="960" y="620" width="310" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Cross-chain arrows -->
+        <mxCell id="xc1" value="Cross-Chain&lt;br&gt;Messages" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=2;dashed=1;fontSize=10;fontColor=#b85450;" edge="1" parent="1" source="xcm" target="chain1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1140" y="460"/>
+              <mxPoint x="295" y="460"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="xc2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=2;dashed=1;" edge="1" parent="1" source="xcm" target="chain2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1140" y="460"/>
+              <mxPoint x="705" y="460"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="xc3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=2;dashed=1;" edge="1" parent="1" source="xcm" target="chain3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1140" y="460"/>
+              <mxPoint x="1115" y="460"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ==================== EXTERNAL LAYER ==================== -->
+        <!-- P2P Network -->
+        <mxCell id="p2p" value="&lt;b&gt;P2P Network (libp2p)&lt;/b&gt;&lt;br&gt;GossipSub: Block Announce + Tx Gossip&lt;br&gt;Kademlia DHT: Peer Discovery&lt;br&gt;Request-Response: Block Sync" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="120" y="760" width="500" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- JSON-RPC -->
+        <mxCell id="rpc" value="&lt;b&gt;JSON-RPC API&lt;/b&gt;&lt;br&gt;vtt_getBalance | vtt_getBlock | vtt_chainStatus&lt;br&gt;vtt_getAsset | vtt_getAssetBalance | vtt_listAssets&lt;br&gt;vtt_getValidators | vtt_getOracle | vtt_txPoolSize" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="680" y="760" width="500" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== USERS ==================== -->
+        <!-- Validators -->
+        <mxCell id="validators" value="&lt;b&gt;Validators&lt;/b&gt;&lt;br&gt;vtt-validator&lt;br&gt;Block Production&lt;br&gt;Ed25519 Signing" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="120" y="890" width="170" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- DApp Developers -->
+        <mxCell id="devs" value="&lt;b&gt;DApp Developers&lt;/b&gt;&lt;br&gt;Rust → WASM Contracts&lt;br&gt;Deploy &amp; Call" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="340" y="890" width="170" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Asset Issuers -->
+        <mxCell id="issuers" value="&lt;b&gt;Asset Issuers (B2B)&lt;/b&gt;&lt;br&gt;Tokenize RWA&lt;br&gt;Attach Legal Docs&lt;br&gt;Set Compliance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="560" y="890" width="170" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Investors -->
+        <mxCell id="investors" value="&lt;b&gt;Investors (B2C)&lt;/b&gt;&lt;br&gt;Buy Asset Fractions&lt;br&gt;Trade with VTT&lt;br&gt;Stake &amp; Vote" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="780" y="890" width="170" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- CLI -->
+        <mxCell id="cli" value="&lt;b&gt;vtt-cli&lt;/b&gt;&lt;br&gt;keygen | balance&lt;br&gt;status | validators" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="890" width="170" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- User arrows -->
+        <mxCell id="u1" style="rounded=1;strokeColor=#666666;" edge="1" parent="1" source="validators" target="p2p">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="u2" style="rounded=1;strokeColor=#666666;" edge="1" parent="1" source="devs" target="rpc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="u3" style="rounded=1;strokeColor=#666666;" edge="1" parent="1" source="issuers" target="rpc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="u4" style="rounded=1;strokeColor=#666666;" edge="1" parent="1" source="investors" target="rpc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="u5" style="rounded=1;strokeColor=#666666;" edge="1" parent="1" source="cli" target="rpc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== VTT TOKEN BOX ==================== -->
+        <mxCell id="vtt-token" value="&lt;b&gt;VTT Token (VETTOR)&lt;/b&gt;&lt;br&gt;&lt;br&gt;⛽ Gas Fees (70% burned, 30% to producer)&lt;br&gt;🔒 Staking (DPoS validator/delegator)&lt;br&gt;🗳️ Governance (stake-weighted voting)&lt;br&gt;💱 Medium of Exchange (buy/sell RWA)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#1a1a2e;fontColor=#ffffff;fontSize=12;align=left;spacingLeft=15;" vertex="1" parent="1">
+          <mxGeometry x="570" y="340" width="440" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- ==================== IDENTITY & COMPLIANCE ==================== -->
+        <mxCell id="identity" value="&lt;b&gt;Identity &amp; Compliance Layer&lt;/b&gt;&lt;br&gt;DID-based Identity | KYC/AML Claims | Jurisdiction Checks&lt;br&gt;Per-chain policies: Permissioned ↔ Permissionless" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6e6e6;strokeColor=#999999;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="120" y="430" width="1170" height="45" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
