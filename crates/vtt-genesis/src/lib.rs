@@ -131,11 +131,12 @@ pub fn build_genesis(config: &GenesisConfig) -> GenesisResult {
         state.put_account(validator.address, account);
     }
 
-    // 3. Create DEX genesis assets (vUSDT and VTT-REV) minted to treasury
+    // 3. Create DEX genesis assets (vUSDT and VTT-REV) minted to validator (acts as treasury in dev)
     let treasury = config
-        .allocations
+        .validators
         .first()
-        .map(|a| a.address)
+        .map(|v| v.address)
+        .or_else(|| config.allocations.first().map(|a| a.address))
         .unwrap_or(Address::ZERO);
     setup_dex_genesis(&mut state, treasury, config.chain.chain_id);
 
