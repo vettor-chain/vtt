@@ -66,6 +66,38 @@ pub enum TransactionAction {
         to: Address,
         payload: CrossChainPayload,
     },
+
+    // DEX actions (variants 9-14)
+    CreatePool {
+        token_a: H256,
+        token_b: H256,
+        amount_a: Amount,
+        amount_b: Amount,
+    },
+    AddLiquidity {
+        pool_id: H256,
+        amount_a: Amount,
+        amount_b: Amount,
+        min_lp: Amount,
+    },
+    RemoveLiquidity {
+        pool_id: H256,
+        lp_amount: Amount,
+        min_a: Amount,
+        min_b: Amount,
+    },
+    Swap {
+        pool_id: H256,
+        token_in: H256,
+        amount_in: Amount,
+        min_amount_out: Amount,
+    },
+    ClaimRevenue {
+        pool_id: H256,
+    },
+    ClaimMiningRewards {
+        pool_id: H256,
+    },
 }
 
 /// Payload for cross-chain transfers.
