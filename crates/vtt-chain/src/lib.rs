@@ -251,6 +251,11 @@ impl Chain {
         &self.consensus
     }
 
+    /// Get the gas configuration.
+    pub fn gas_config(&self) -> &GasConfig {
+        &self.gas_config
+    }
+
     /// Get the current validator set.
     pub fn validator_set(&self) -> &ValidatorSet {
         &self.validator_set

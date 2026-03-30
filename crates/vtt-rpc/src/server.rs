@@ -15,8 +15,9 @@ use vtt_primitives::{Address, BlockNumber, H256};
 use vtt_txpool::TxPool;
 
 use crate::types::{
-    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, DelegationInfo,
-    OracleFeedInfo, PoolInfo, StakingInfo, SwapQuoteRpc, ValidatorInfoRpc,
+    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, ConsensusParamsRpc,
+    DelegationInfo, GasConfigRpc, OracleFeedInfo, PoolInfo, StakingInfo, SwapQuoteRpc,
+    ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -48,6 +49,14 @@ pub trait VttApi {
     /// Get chain status.
     #[method(name = "vtt_chainStatus")]
     async fn chain_status(&self) -> Result<ChainStatus, ErrorObjectOwned>;
+
+    /// Get consensus parameters.
+    #[method(name = "vtt_getConsensusParams")]
+    async fn get_consensus_params(&self) -> Result<ConsensusParamsRpc, ErrorObjectOwned>;
+
+    /// Get gas configuration.
+    #[method(name = "vtt_getGasConfig")]
+    async fn get_gas_config(&self) -> Result<GasConfigRpc, ErrorObjectOwned>;
 
     /// Get the active validator set.
     #[method(name = "vtt_getValidators")]
@@ -170,6 +179,31 @@ impl VttApiServer for VttRpcImpl {
             head_hash: chain.head_hash().unwrap_or(H256::ZERO),
             validator_count: vs.len(),
             total_stake: vs.total_stake(),
+        })
+    }
+
+    async fn get_consensus_params(&self) -> Result<ConsensusParamsRpc, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let p = chain.consensus().params();
+        Ok(ConsensusParamsRpc {
+            epoch_length: p.epoch_length,
+            block_time_ms: p.block_time_ms,
+            active_validators: p.active_validators,
+            min_self_stake: p.min_self_stake,
+            unbonding_period_secs: p.unbonding_period_secs,
+            slash_double_sign_bps: p.slash_double_sign_bps,
+            slash_downtime_bps: p.slash_downtime_bps,
+            downtime_threshold_pct: p.downtime_threshold_pct,
+        })
+    }
+
+    async fn get_gas_config(&self) -> Result<GasConfigRpc, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let g = chain.gas_config();
+        Ok(GasConfigRpc {
+            min_gas_price: g.min_gas_price,
+            base_transfer_cost: g.base_transfer_cost,
+            cost_per_byte: g.cost_per_byte,
         })
     }
 

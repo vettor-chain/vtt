@@ -51,6 +51,27 @@ pub struct ChainStatus {
     pub total_stake: Amount,
 }
 
+/// RPC response for consensus parameters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConsensusParamsRpc {
+    pub epoch_length: u64,
+    pub block_time_ms: u64,
+    pub active_validators: u32,
+    pub min_self_stake: Amount,
+    pub unbonding_period_secs: u64,
+    pub slash_double_sign_bps: u16,
+    pub slash_downtime_bps: u16,
+    pub downtime_threshold_pct: u8,
+}
+
+/// RPC response for gas configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GasConfigRpc {
+    pub min_gas_price: Amount,
+    pub base_transfer_cost: u64,
+    pub cost_per_byte: u64,
+}
+
 /// RPC response for validator info.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ValidatorInfoRpc {
