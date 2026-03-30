@@ -59,7 +59,10 @@ impl GenesisConfig {
                 },
                 gas: GasConfig::default(),
             },
-            timestamp: 1_700_000_000_000, // Fixed timestamp for reproducibility
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
             allocations: vec![
                 GenesisAllocation {
                     address: dev_addr_1,
