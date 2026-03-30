@@ -10,6 +10,7 @@ description = "Genesis block construction for VTT blockchain"
 vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-state = { workspace = true }
+vtt-dex = { path = "../vtt-dex" }
 borsh = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
