@@ -5,7 +5,7 @@ use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus};
 use vtt_state::StateDB;
 
 use crate::error::DexError;
-use crate::math::{sqrt_u128, U256};
+use crate::math::{sqrt_u256, U256};
 use crate::pool::*;
 
 /// Create a new liquidity pool
@@ -35,12 +35,8 @@ pub fn create_pool(
     transfer_token_in(state, sender, &token_a, amount_a)?;
     transfer_token_in(state, sender, &token_b, amount_b)?;
 
-    // Mint LP tokens: sqrt(amount_a * amount_b)
-    let lp_minted = sqrt_u128(
-        U256::mul_u128(amount_a.0, amount_b.0)
-            .div_u128(1)
-            .map_err(|_| DexError::Overflow)?,
-    );
+    // Mint LP tokens: sqrt(amount_a * amount_b) — uses U256 to avoid overflow
+    let lp_minted = sqrt_u256(U256::mul_u128(amount_a.0, amount_b.0));
 
     if lp_minted <= MINIMUM_LIQUIDITY {
         return Err(DexError::ZeroLiquidity);

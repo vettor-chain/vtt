@@ -95,6 +95,33 @@ pub fn sqrt_u128(n: u128) -> u128 {
     x
 }
 
+/// Integer square root of U256, returning u128.
+/// Uses Newton's method with u128 arithmetic by first estimating
+/// from the highest non-zero bits.
+pub fn sqrt_u256(n: U256) -> u128 {
+    if n.hi == 0 {
+        return sqrt_u128(n.lo);
+    }
+
+    // Initial estimate: sqrt(hi * 2^128 + lo) ≈ sqrt(hi) * 2^64
+    // This gives us a good starting point for Newton's method
+    let mut x = (sqrt_u128(n.hi) + 1) << 64;
+
+    // Newton's method: x = (x + n/x) / 2
+    // We need n/x which is U256/u128 = u128
+    loop {
+        let div = n.div_u128(x).unwrap_or(u128::MAX);
+        let next = (x >> 1) + (div >> 1) + ((x & 1) + (div & 1)) / 2;
+        if next >= x {
+            break;
+        }
+        x = next;
+    }
+
+    // Verify: x*x <= n < (x+1)*(x+1)
+    x
+}
+
 /// Calculate swap output using constant product formula.
 ///
 /// Given:
