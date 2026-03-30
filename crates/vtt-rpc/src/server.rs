@@ -7,6 +7,7 @@ use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
 use tracing::info;
 
+use borsh::BorshDeserialize;
 use vtt_chain::Chain;
 use vtt_crypto::blake3_hash;
 use vtt_primitives::amount::Amount;
@@ -15,7 +16,7 @@ use vtt_txpool::TxPool;
 
 use crate::types::{
     AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, DelegationInfo,
-    OracleFeedInfo, StakingInfo, ValidatorInfoRpc,
+    OracleFeedInfo, PoolInfo, StakingInfo, SwapQuoteRpc, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -86,6 +87,23 @@ pub trait VttApi {
         &self,
         address: Address,
     ) -> Result<Option<StakingInfo>, ErrorObjectOwned>;
+
+    /// List all DEX liquidity pools.
+    #[method(name = "vtt_listPools")]
+    async fn list_pools(&self) -> Result<Vec<PoolInfo>, ErrorObjectOwned>;
+
+    /// Get a single DEX pool by its H256 ID.
+    #[method(name = "vtt_getPool")]
+    async fn get_pool(&self, pool_id: H256) -> Result<Option<PoolInfo>, ErrorObjectOwned>;
+
+    /// Get a swap quote (read-only, no state mutation).
+    #[method(name = "vtt_getSwapQuote")]
+    async fn get_swap_quote(
+        &self,
+        pool_id: H256,
+        amount_in: String,
+        a_to_b: bool,
+    ) -> Result<SwapQuoteRpc, ErrorObjectOwned>;
 }
 
 /// Shared state accessible by RPC handlers.
@@ -278,6 +296,105 @@ impl VttApiServer for VttRpcImpl {
                 })
                 .collect(),
         }))
+    }
+
+    async fn list_pools(&self) -> Result<Vec<PoolInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let mut pools = Vec::new();
+        for (_id, data) in chain.state().iter_pools() {
+            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
+            })?;
+            pools.push(pool_state_to_info(&pool));
+        }
+        Ok(pools)
+    }
+
+    async fn get_pool(&self, pool_id: H256) -> Result<Option<PoolInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        match chain.state().get_pool_raw(&pool_id) {
+            None => Ok(None),
+            Some(data) => {
+                let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32603,
+                        format!("pool deserialize error: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                Ok(Some(pool_state_to_info(&pool)))
+            }
+        }
+    }
+
+    async fn get_swap_quote(
+        &self,
+        pool_id: H256,
+        amount_in: String,
+        a_to_b: bool,
+    ) -> Result<SwapQuoteRpc, ErrorObjectOwned> {
+        let amount_in_u128: u128 = amount_in.parse().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "invalid amount_in: expected decimal u128", None::<()>)
+        })?;
+
+        let chain = self.state.chain.read().unwrap();
+        let data = chain.state().get_pool_raw(&pool_id).ok_or_else(|| {
+            ErrorObjectOwned::owned(-32602, "pool not found", None::<()>)
+        })?;
+        let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
+        })?;
+
+        let (reserve_in, reserve_out) = if a_to_b {
+            (pool.reserve_a.raw(), pool.reserve_b.raw())
+        } else {
+            (pool.reserve_b.raw(), pool.reserve_a.raw())
+        };
+
+        let (amount_in_net, _lp_fee, _protocol_fee) =
+            vtt_dex::math::calculate_fees(amount_in_u128, pool.fee_bps, pool.protocol_fee_bps)
+                .map_err(|e| {
+                    ErrorObjectOwned::owned(-32603, format!("fee calculation error: {e}"), None::<()>)
+                })?;
+
+        // total_fee = lp_fee + protocol_fee, already captured as amount_in - amount_in_net
+        let total_fee = amount_in_u128.saturating_sub(amount_in_net);
+
+        let amount_out =
+            vtt_dex::math::get_amount_out(amount_in_net, reserve_in, reserve_out).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("swap quote error: {e}"), None::<()>)
+            })?;
+
+        // Price impact in bps: (amount_in_net / reserve_in) * 10000
+        let price_impact_bps = if reserve_in > 0 {
+            ((amount_in_net as u64).saturating_mul(10_000) / reserve_in.min(u64::MAX as u128) as u64) as u32
+        } else {
+            0
+        };
+
+        Ok(SwapQuoteRpc {
+            amount_in: amount_in_u128.to_string(),
+            amount_out: amount_out.to_string(),
+            price_impact_bps,
+            fee: total_fee.to_string(),
+        })
+    }
+}
+
+/// Convert a `PoolState` into the RPC-friendly `PoolInfo`.
+fn pool_state_to_info(pool: &vtt_dex::PoolState) -> PoolInfo {
+    PoolInfo {
+        pool_id: hex::encode(pool.pool_id.as_bytes()),
+        token_a: hex::encode(pool.token_a.as_bytes()),
+        token_b: hex::encode(pool.token_b.as_bytes()),
+        reserve_a: pool.reserve_a.raw().to_string(),
+        reserve_b: pool.reserve_b.raw().to_string(),
+        lp_token_id: hex::encode(pool.lp_token_id.as_bytes()),
+        lp_total_supply: pool.lp_total_supply.raw().to_string(),
+        fee_bps: pool.fee_bps,
+        protocol_fee_bps: pool.protocol_fee_bps,
+        protocol_fees_a: pool.protocol_fees_a.raw().to_string(),
+        protocol_fees_b: pool.protocol_fees_b.raw().to_string(),
     }
 }
 

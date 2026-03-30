@@ -144,6 +144,31 @@ pub struct StakingInfo {
     pub delegations: Vec<DelegationInfo>,
 }
 
+/// RPC response for DEX pool info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolInfo {
+    pub pool_id: String,
+    pub token_a: String,
+    pub token_b: String,
+    pub reserve_a: String,
+    pub reserve_b: String,
+    pub lp_token_id: String,
+    pub lp_total_supply: String,
+    pub fee_bps: u16,
+    pub protocol_fee_bps: u16,
+    pub protocol_fees_a: String,
+    pub protocol_fees_b: String,
+}
+
+/// RPC response for a DEX swap quote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapQuoteRpc {
+    pub amount_in: String,
+    pub amount_out: String,
+    pub price_impact_bps: u32,
+    pub fee: String,
+}
+
 /// Delegation info within staking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegationInfo {

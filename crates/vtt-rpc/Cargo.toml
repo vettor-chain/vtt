@@ -10,6 +10,7 @@ description = "JSON-RPC server for VTT blockchain"
 vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-chain = { workspace = true }
+vtt-dex = { path = "../vtt-dex" }
 vtt-txpool = { workspace = true }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }
