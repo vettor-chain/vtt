@@ -341,6 +341,125 @@ fn shared_security_rotation() {
     assert_eq!(all_assigned.len(), 21);
 }
 
+/// Test DEX swap lifecycle: asset creation → pool creation → swap
+///
+/// Uses raw amounts (not from_vtt) for pool/swap operations because the AMM's
+/// LP math (sqrt(a*b)) requires the product to fit in u128 after U256 intermediate.
+#[test]
+fn dex_swap_lifecycle() {
+    let alice_kp = Keypair::from_seed(&[0x41; 32]);
+    let alice_addr = alice_kp.address();
+
+    let mut state = StateDB::new();
+    state.put_account(
+        alice_addr,
+        AccountState::with_balance(Amount::from_vtt(100_000)),
+    );
+
+    let gas_config = GasConfig::default();
+
+    // Step 1: Create vUSDT asset (use raw amount for total supply to stay in safe range)
+    let asset_supply = Amount::from_raw(10_000_000);
+    let create_asset_tx = make_tx(
+        &alice_kp,
+        0,
+        TransactionAction::CreateAssetClass {
+            name: "Virtual USDT".to_string(),
+            symbol: "vUSDT".to_string(),
+            metadata_uri: "ipfs://vusdt".to_string(),
+            total_supply: asset_supply,
+        },
+    );
+
+    let (receipts, _) =
+        execute_block_transactions(&mut state, &[create_asset_tx], &gas_config, 10_000_000);
+    assert!(receipts[0].success, "CreateAssetClass failed: {:?}", receipts[0]);
+
+    // Derive asset_id the same way the executor does
+    let asset_id = blake3_hash(&borsh::to_vec(&(alice_addr, "Virtual USDT", "vUSDT")).unwrap());
+
+    // Verify asset exists and alice holds the total supply
+    let alice_vusdt = state.get_ownership(&asset_id, &alice_addr);
+    assert_eq!(alice_vusdt.available, asset_supply);
+
+    // Step 2: Create VTT/vUSDT pool
+    let pool_amount_vtt = Amount::from_raw(1_000_000);
+    let pool_amount_vusdt = Amount::from_raw(4_000_000);
+
+    let create_pool_tx = make_tx(
+        &alice_kp,
+        1,
+        TransactionAction::CreatePool {
+            token_a: H256::ZERO,       // native VTT
+            token_b: asset_id,
+            amount_a: pool_amount_vtt,
+            amount_b: pool_amount_vusdt,
+        },
+    );
+
+    let alice_balance_before_pool = state.get_balance(&alice_addr);
+
+    let (receipts, _) =
+        execute_block_transactions(&mut state, &[create_pool_tx], &gas_config, 10_000_000);
+    assert!(receipts[0].success, "CreatePool failed: {:?}", receipts[0]);
+
+    // Step 3: Verify pool exists
+    let pool_id = vtt_dex::compute_pool_id(&H256::ZERO, &asset_id);
+    assert!(state.has_pool(&pool_id), "Pool should exist after creation");
+
+    // Alice's VTT balance decreased by pool deposit + gas
+    let alice_balance_after_pool = state.get_balance(&alice_addr);
+    assert!(
+        alice_balance_after_pool < alice_balance_before_pool,
+        "Alice VTT balance should decrease after pool creation"
+    );
+
+    // Alice's vUSDT decreased by pool deposit
+    let alice_vusdt_after_pool = state.get_ownership(&asset_id, &alice_addr);
+    assert_eq!(
+        alice_vusdt_after_pool.available,
+        Amount::from_raw(asset_supply.0 - pool_amount_vusdt.0),
+    );
+
+    // Step 4: Swap VTT → vUSDT
+    let swap_amount = Amount::from_raw(100_000);
+    let alice_balance_before_swap = state.get_balance(&alice_addr);
+    let alice_vusdt_before_swap = state.get_ownership(&asset_id, &alice_addr).available;
+
+    let swap_tx = make_tx(
+        &alice_kp,
+        2,
+        TransactionAction::Swap {
+            pool_id,
+            token_in: H256::ZERO,
+            amount_in: swap_amount,
+            min_amount_out: Amount::ZERO,
+        },
+    );
+
+    let (receipts, _) =
+        execute_block_transactions(&mut state, &[swap_tx], &gas_config, 10_000_000);
+    assert!(receipts[0].success, "Swap failed: {:?}", receipts[0]);
+
+    // Step 5: Verify balances after swap
+    let alice_balance_after_swap = state.get_balance(&alice_addr);
+    let alice_vusdt_after_swap = state.get_ownership(&asset_id, &alice_addr).available;
+
+    // VTT balance decreased (swap amount + gas)
+    assert!(
+        alice_balance_after_swap < alice_balance_before_swap,
+        "Alice VTT should decrease after swap"
+    );
+
+    // vUSDT balance increased (received output tokens)
+    assert!(
+        alice_vusdt_after_swap > alice_vusdt_before_swap,
+        "Alice vUSDT should increase after swap: before={}, after={}",
+        alice_vusdt_before_swap.0,
+        alice_vusdt_after_swap.0,
+    );
+}
+
 fn make_tx(keypair: &Keypair, nonce: u64, action: TransactionAction) -> SignedTransaction {
     let payload = TransactionPayload {
         chain_id: ChainId::RELAY,

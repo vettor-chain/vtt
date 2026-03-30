@@ -19,4 +19,5 @@ vtt-genesis = { workspace = true }
 vtt-txpool = { workspace = true }
 vtt-multichain = { workspace = true }
 vtt-compliance = { workspace = true }
+vtt-dex = { workspace = true }
 borsh = { workspace = true }

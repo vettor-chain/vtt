@@ -74,6 +74,7 @@ vtt-network = { path = "crates/vtt-network" }
 vtt-chain = { path = "crates/vtt-chain" }
 vtt-multichain = { path = "crates/vtt-multichain" }
 vtt-compliance = { path = "crates/vtt-compliance" }
+vtt-dex = { path = "crates/vtt-dex" }
 vtt-rpc = { path = "crates/vtt-rpc" }
 vtt-genesis = { path = "crates/vtt-genesis" }
 vtt-telemetry = { path = "crates/vtt-telemetry" }
