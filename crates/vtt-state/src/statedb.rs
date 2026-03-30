@@ -37,12 +37,16 @@ pub struct StateDB {
     oracles: HashMap<H256, OracleFeed>,
     /// Contract code storage: code_hash -> bytecode.
     contract_code: HashMap<H256, Vec<u8>>,
+    /// Pool storage: pool_id -> raw serialized pool data.
+    pools: HashMap<H256, Vec<u8>>,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
     dirty: Vec<Address>,
     /// Tracks which assets have been modified.
     dirty_assets: Vec<H256>,
+    /// Tracks which pools have been modified.
+    dirty_pools: Vec<H256>,
 }
 
 impl StateDB {
@@ -54,9 +58,11 @@ impl StateDB {
             ownership: HashMap::new(),
             oracles: HashMap::new(),
             contract_code: HashMap::new(),
+            pools: HashMap::new(),
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
+            dirty_pools: Vec::new(),
         }
     }
 
@@ -285,6 +291,25 @@ impl StateDB {
         self.contract_code.get(code_hash)
     }
 
+    // --- Pool Methods ---
+
+    pub fn get_pool_raw(&self, pool_id: &H256) -> Option<&[u8]> {
+        self.pools.get(pool_id).map(|v| v.as_slice())
+    }
+
+    pub fn put_pool_raw(&mut self, pool_id: H256, data: Vec<u8>) {
+        self.pools.insert(pool_id, data);
+        self.dirty_pools.push(pool_id);
+    }
+
+    pub fn has_pool(&self, pool_id: &H256) -> bool {
+        self.pools.contains_key(pool_id)
+    }
+
+    pub fn iter_pools(&self) -> impl Iterator<Item = (&H256, &[u8])> {
+        self.pools.iter().map(|(k, v)| (k, v.as_slice()))
+    }
+
     /// Compute the state root by flushing dirty accounts and assets into the trie.
     pub fn compute_state_root(&mut self) -> H256 {
         for addr in self.dirty.drain(..) {
@@ -309,6 +334,14 @@ impl StateDB {
             }
         }
 
+        for pool_id in self.dirty_pools.drain(..) {
+            if let Some(pool_data) = self.pools.get(&pool_id) {
+                let mut key = b"pool:".to_vec();
+                key.extend_from_slice(pool_id.as_bytes());
+                self.trie.insert(key, pool_data.clone());
+            }
+        }
+
         self.trie.root()
     }
 
@@ -330,6 +363,8 @@ impl StateDB {
             ownership: self.ownership.clone(),
             oracles: self.oracles.clone(),
             contract_code: self.contract_code.clone(),
+            pools: self.pools.clone(),
+            dirty_pools: self.dirty_pools.clone(),
         }
     }
 
@@ -347,11 +382,19 @@ impl StateDB {
         for id in snapshot.assets.keys() {
             self.dirty_assets.push(*id);
         }
+        for id in self.pools.keys() {
+            self.dirty_pools.push(*id);
+        }
+        for id in snapshot.pools.keys() {
+            self.dirty_pools.push(*id);
+        }
         self.accounts = snapshot.accounts;
         self.assets = snapshot.assets;
         self.ownership = snapshot.ownership;
         self.oracles = snapshot.oracles;
         self.contract_code = snapshot.contract_code;
+        self.pools = snapshot.pools;
+        self.dirty_pools = snapshot.dirty_pools;
     }
 }
 
@@ -369,6 +412,8 @@ pub struct StateSnapshot {
     ownership: HashMap<(H256, Address), OwnershipRecord>,
     oracles: HashMap<H256, OracleFeed>,
     contract_code: HashMap<H256, Vec<u8>>,
+    pools: HashMap<H256, Vec<u8>>,
+    dirty_pools: Vec<H256>,
 }
 
 #[cfg(test)]
