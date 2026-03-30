@@ -12,6 +12,7 @@ members = [
     "crates/vtt-chain",
     "crates/vtt-multichain",
     "crates/vtt-compliance",
+    "crates/vtt-dex",
     "crates/vtt-rpc",
     "crates/vtt-genesis",
     "crates/vtt-telemetry",

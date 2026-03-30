@@ -1,0 +1,10 @@
+[package]
+name = "vtt-dex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vtt-primitives = { path = "../vtt-primitives" }
+vtt-state = { path = "../vtt-state" }
+vtt-crypto = { path = "../vtt-crypto" }
+borsh = { version = "1", features = ["derive"] }
