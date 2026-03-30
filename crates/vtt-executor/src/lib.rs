@@ -32,6 +32,8 @@ pub enum ExecutionError {
     StakeBelowMinimum { have: Amount, need: Amount },
     #[error("cannot unstake more than staked: staked {staked}, requested {requested}")]
     UnstakeExceedsStake { staked: Amount, requested: Amount },
+    #[error("{0}")]
+    Custom(String),
 }
 
 /// Result of executing a single transaction.
@@ -273,6 +275,73 @@ fn execute_action(
                     blake3_hash(&borsh::to_vec(destination_chain).unwrap()),
                 ],
                 data: borsh::to_vec(&(*sender, *to, payload)).unwrap(),
+            }])
+        }
+
+        TransactionAction::CreatePool { token_a, token_b, amount_a, amount_b } => {
+            let pool = vtt_dex::liquidity::create_pool(
+                state, sender, *token_a, *token_b, *amount_a, *amount_b, 0, // TODO: pass current epoch
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"CreatePool"), pool.pool_id],
+                data: borsh::to_vec(&pool.pool_id).unwrap(),
+            }])
+        }
+
+        TransactionAction::AddLiquidity { pool_id, amount_a, amount_b, min_lp } => {
+            let lp_minted = vtt_dex::liquidity::add_liquidity(
+                state, sender, pool_id, *amount_a, *amount_b, *min_lp,
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"AddLiquidity"), *pool_id],
+                data: borsh::to_vec(&lp_minted.0).unwrap(),
+            }])
+        }
+
+        TransactionAction::RemoveLiquidity { pool_id, lp_amount, min_a, min_b } => {
+            let (out_a, out_b) = vtt_dex::liquidity::remove_liquidity(
+                state, sender, pool_id, *lp_amount, *min_a, *min_b,
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"RemoveLiquidity"), *pool_id],
+                data: borsh::to_vec(&(out_a.0, out_b.0)).unwrap(),
+            }])
+        }
+
+        TransactionAction::Swap { pool_id, token_in, amount_in, min_amount_out } => {
+            let amount_out = vtt_dex::swap::execute_swap(
+                state, sender, pool_id, token_in, *amount_in, *min_amount_out,
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"Swap"), *pool_id],
+                data: borsh::to_vec(&amount_out.0).unwrap(),
+            }])
+        }
+
+        TransactionAction::ClaimRevenue { pool_id } => {
+            // Treasury address hardcoded for now — should come from chain config
+            let treasury = Address::ZERO; // TODO: configure via genesis
+            let (fees_a, fees_b) = vtt_dex::revenue::claim_protocol_fees(
+                state, sender, pool_id, &treasury,
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"ClaimRevenue"), *pool_id],
+                data: borsh::to_vec(&(fees_a.0, fees_b.0)).unwrap(),
+            }])
+        }
+
+        TransactionAction::ClaimMiningRewards { pool_id } => {
+            // Mining state would need to be loaded from storage
+            // For now, emit log — full mining integration in a follow-up
+            Ok(vec![Log {
+                address: *sender,
+                topics: vec![blake3_hash(b"ClaimMiningRewards"), *pool_id],
+                data: vec![],
             }])
         }
     }
@@ -552,6 +621,12 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::CreateAssetClass { .. } => config.base_transfer_cost * 5,
         TransactionAction::AssetTransfer { .. } => config.base_transfer_cost * 2,
         TransactionAction::CrossChainTransfer { .. } => config.base_transfer_cost * 3,
+        TransactionAction::CreatePool { .. } => 50_000,
+        TransactionAction::AddLiquidity { .. } => 30_000,
+        TransactionAction::RemoveLiquidity { .. } => 30_000,
+        TransactionAction::Swap { .. } => 25_000,
+        TransactionAction::ClaimRevenue { .. } => 10_000,
+        TransactionAction::ClaimMiningRewards { .. } => 10_000,
     }
 }
 
