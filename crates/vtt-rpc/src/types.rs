@@ -49,6 +49,8 @@ pub struct ChainStatus {
     pub head_hash: H256,
     pub validator_count: usize,
     pub total_stake: Amount,
+    pub total_burned: Amount,
+    pub total_minted: Amount,
 }
 
 /// RPC response for consensus parameters.
@@ -148,10 +150,31 @@ pub struct TransactionInfo {
     pub hash: H256,
     pub block_number: BlockNumber,
     pub from: Address,
+    pub to: Option<Address>,
+    pub action_type: String,
+    pub amount: Amount,
     pub nonce: u64,
-    pub action: String,
     pub gas_price: Amount,
     pub gas_limit: u64,
+    pub timestamp: u64,
+    /// Swap-specific: pool ID (hex)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_pool_id: Option<String>,
+    /// Swap-specific: token being sold (hex)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_token_in: Option<String>,
+    /// Swap-specific: minimum output amount
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_min_out: Option<Amount>,
+}
+
+/// Paginated result wrapper.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaginatedResult<T> {
+    pub items: Vec<T>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
 }
 
 /// RPC response for staking info.
@@ -197,6 +220,22 @@ pub struct DelegationInfo {
     pub amount: Amount,
 }
 
+/// RPC response for asset governance proposal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetProposalInfo {
+    pub id: H256,
+    pub asset_id: H256,
+    pub proposer: Address,
+    pub action_type: String,
+    pub description: String,
+    pub status: String,
+    pub votes_yes: Amount,
+    pub votes_no: Amount,
+    pub votes_abstain: Amount,
+    pub voting_end: BlockNumber,
+    pub created_at: BlockNumber,
+}
+
 /// RPC response for governance proposal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProposalInfo {
@@ -212,6 +251,19 @@ pub struct ProposalInfo {
     pub voting_end: BlockNumber,
 }
 
+/// RPC response for bridge withdrawal events (used by the relayer).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BridgeWithdrawalInfo {
+    pub tx_hash: H256,
+    pub block_number: BlockNumber,
+    pub sender: Address,
+    pub token: H256,
+    pub amount: Amount,
+    pub destination_chain: u32,
+    pub destination_address: Address,
+    pub timestamp: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +276,8 @@ mod tests {
             head_hash: H256::from([0xAB; 32]),
             validator_count: 21,
             total_stake: Amount::from_vtt(1_000_000),
+            total_burned: Amount::ZERO,
+            total_minted: Amount::ZERO,
         };
         let json = serde_json::to_string(&status).unwrap();
         let status2: ChainStatus = serde_json::from_str(&json).unwrap();

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use jsonrpsee::core::async_trait;
@@ -15,9 +16,9 @@ use vtt_primitives::{Address, BlockNumber, H256};
 use vtt_txpool::TxPool;
 
 use crate::types::{
-    AccountInfo, AssetBalanceInfo, AssetInfo, BlockInfo, ChainStatus, ConsensusParamsRpc,
-    DelegationInfo, GasConfigRpc, OracleFeedInfo, PoolInfo, StakingInfo, SwapQuoteRpc,
-    ValidatorInfoRpc,
+    AccountInfo, AssetBalanceInfo, AssetInfo, AssetProposalInfo, BlockInfo, BridgeWithdrawalInfo,
+    ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, OracleFeedInfo,
+    PaginatedResult, PoolInfo, StakingInfo, SwapQuoteRpc, TransactionInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -113,12 +114,60 @@ pub trait VttApi {
         amount_in: String,
         a_to_b: bool,
     ) -> Result<SwapQuoteRpc, ErrorObjectOwned>;
+
+    /// List transactions (paginated, most recent first).
+    #[method(name = "vtt_listTransactions")]
+    async fn list_transactions(
+        &self,
+        page: usize,
+        limit: usize,
+    ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned>;
+
+    /// Get a single transaction by hash.
+    #[method(name = "vtt_getTransaction")]
+    async fn get_transaction(
+        &self,
+        hash: H256,
+    ) -> Result<Option<TransactionInfo>, ErrorObjectOwned>;
+
+    /// Get transactions by address (paginated, most recent first).
+    #[method(name = "vtt_getTransactionsByAddress")]
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        page: usize,
+        limit: usize,
+    ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned>;
+
+    /// Get all asset governance proposals for an asset.
+    #[method(name = "vtt_getAssetProposals")]
+    async fn get_asset_proposals(
+        &self,
+        asset_id: H256,
+    ) -> Result<Vec<AssetProposalInfo>, ErrorObjectOwned>;
+
+    /// Get a single asset governance proposal by ID.
+    #[method(name = "vtt_getAssetProposal")]
+    async fn get_asset_proposal(
+        &self,
+        proposal_id: H256,
+    ) -> Result<Option<AssetProposalInfo>, ErrorObjectOwned>;
+
+    /// Get all bridge withdrawal events (for relayer monitoring).
+    #[method(name = "vtt_getBridgeWithdrawals")]
+    async fn get_bridge_withdrawals(
+        &self,
+    ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned>;
 }
 
 /// Shared state accessible by RPC handlers.
 pub struct RpcState {
     pub chain: Arc<RwLock<Chain>>,
     pub txpool: Arc<RwLock<TxPool>>,
+    /// Cumulative VTT burned from gas fees (raw, stored as high 64 bits lost — in whole VTT units × 1000 for milli-VTT precision).
+    pub total_burned_milli: AtomicU64,
+    /// Cumulative VTT minted as block rewards (whole VTT units × 1000).
+    pub total_minted_milli: AtomicU64,
 }
 
 /// Implementation of the VTT JSON-RPC API.
@@ -179,6 +228,8 @@ impl VttApiServer for VttRpcImpl {
             head_hash: chain.head_hash().unwrap_or(H256::ZERO),
             validator_count: vs.len(),
             total_stake: vs.total_stake(),
+            total_burned: Amount::from_raw(self.state.total_burned_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15)),
+            total_minted: Amount::from_raw(self.state.total_minted_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15)),
         })
     }
 
@@ -413,6 +464,240 @@ impl VttApiServer for VttRpcImpl {
             fee: total_fee.to_string(),
         })
     }
+
+    async fn list_transactions(
+        &self,
+        page: usize,
+        limit: usize,
+    ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let all = collect_all_txs(&chain);
+        let total = all.len();
+        let start = page * limit;
+        let items = all.into_iter().skip(start).take(limit).collect();
+        Ok(PaginatedResult {
+            items,
+            total,
+            page,
+            page_size: limit,
+        })
+    }
+
+    async fn get_transaction(
+        &self,
+        hash: H256,
+    ) -> Result<Option<TransactionInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let height = chain.height().unwrap_or(0);
+        for n in (0..=height).rev() {
+            if let Some(block) = chain.get_block_by_number(n) {
+                for tx in &block.transactions {
+                    let tx_hash = blake3_hash(&tx.payload_bytes());
+                    if tx_hash == hash {
+                        return Ok(Some(tx_to_info(tx, block.header.number, block.header.timestamp)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn get_transactions_by_address(
+        &self,
+        address: Address,
+        page: usize,
+        limit: usize,
+    ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let all: Vec<TransactionInfo> = collect_all_txs(&chain)
+            .into_iter()
+            .filter(|tx| tx.from == address || tx.to == Some(address))
+            .collect();
+        let total = all.len();
+        let start = page * limit;
+        let items = all.into_iter().skip(start).take(limit).collect();
+        Ok(PaginatedResult {
+            items,
+            total,
+            page,
+            page_size: limit,
+        })
+    }
+
+    async fn get_asset_proposals(
+        &self,
+        asset_id: H256,
+    ) -> Result<Vec<AssetProposalInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        let proposals = chain.state().iter_asset_proposals_for_asset(&asset_id);
+        Ok(proposals.into_iter().map(proposal_to_info).collect())
+    }
+
+    async fn get_asset_proposal(
+        &self,
+        proposal_id: H256,
+    ) -> Result<Option<AssetProposalInfo>, ErrorObjectOwned> {
+        let chain = self.state.chain.read().unwrap();
+        Ok(chain
+            .state()
+            .get_asset_proposal(&proposal_id)
+            .map(proposal_to_info))
+    }
+
+    async fn get_bridge_withdrawals(
+        &self,
+    ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned> {
+        use vtt_primitives::transaction::TransactionAction;
+
+        let chain = self.state.chain.read().unwrap();
+        let height = chain.height().unwrap_or(0);
+        let mut withdrawals = Vec::new();
+
+        for n in (0..=height).rev() {
+            if let Some(block) = chain.get_block_by_number(n) {
+                let ts = block.header.timestamp;
+                let bn = block.header.number;
+                for tx in &block.transactions {
+                    if let TransactionAction::BridgeWithdraw {
+                        token,
+                        amount,
+                        destination_chain,
+                        destination_address,
+                    } = &tx.payload.action
+                    {
+                        let tx_hash = blake3_hash(&tx.payload_bytes());
+                        let sender = vtt_crypto::address_from_public_key(&tx.public_key);
+                        withdrawals.push(BridgeWithdrawalInfo {
+                            tx_hash,
+                            block_number: bn,
+                            sender,
+                            token: *token,
+                            amount: *amount,
+                            destination_chain: *destination_chain,
+                            destination_address: *destination_address,
+                            timestamp: ts,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(withdrawals)
+    }
+}
+
+/// Build a `TransactionInfo` from a `SignedTransaction` within a block.
+fn tx_to_info(
+    tx: &vtt_primitives::transaction::SignedTransaction,
+    block_number: BlockNumber,
+    timestamp: u64,
+) -> TransactionInfo {
+    use vtt_primitives::transaction::TransactionAction;
+
+    let hash = blake3_hash(&tx.payload_bytes());
+    let from = vtt_crypto::address_from_public_key(&tx.public_key);
+
+    let (action_type, to, amount, swap_pool_id, swap_token_in, swap_min_out) = match &tx.payload.action {
+        TransactionAction::Transfer { to, amount } => {
+            ("Transfer".to_string(), Some(*to), *amount, None, None, None)
+        }
+        TransactionAction::Stake { validator, amount } => {
+            ("Stake".to_string(), Some(*validator), *amount, None, None, None)
+        }
+        TransactionAction::Unstake { validator, amount } => {
+            ("Unstake".to_string(), Some(*validator), *amount, None, None, None)
+        }
+        TransactionAction::AssetTransfer { to, amount, .. } => {
+            ("AssetTransfer".to_string(), Some(*to), *amount, None, None, None)
+        }
+        TransactionAction::DeployContract { .. } => {
+            ("DeployContract".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::CallContract { contract, value, .. } => {
+            ("CallContract".to_string(), Some(*contract), *value, None, None, None)
+        }
+        TransactionAction::GovernanceVote { .. } => {
+            ("GovernanceVote".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::CreateAssetClass { total_supply, .. } => {
+            ("CreateAssetClass".to_string(), None, *total_supply, None, None, None)
+        }
+        TransactionAction::CrossChainTransfer { to, .. } => {
+            ("CrossChainTransfer".to_string(), Some(*to), Amount::ZERO, None, None, None)
+        }
+        TransactionAction::CreatePool { amount_a, .. } => {
+            ("CreatePool".to_string(), None, *amount_a, None, None, None)
+        }
+        TransactionAction::AddLiquidity { amount_a, .. } => {
+            ("AddLiquidity".to_string(), None, *amount_a, None, None, None)
+        }
+        TransactionAction::RemoveLiquidity { lp_amount, .. } => {
+            ("RemoveLiquidity".to_string(), None, *lp_amount, None, None, None)
+        }
+        TransactionAction::Swap { pool_id, token_in, amount_in, min_amount_out } => {
+            (
+                "Swap".to_string(),
+                None,
+                *amount_in,
+                Some(hex::encode(pool_id.as_bytes())),
+                Some(hex::encode(token_in.as_bytes())),
+                Some(*min_amount_out),
+            )
+        }
+        TransactionAction::ClaimRevenue { .. } => {
+            ("ClaimRevenue".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::ClaimMiningRewards { .. } => {
+            ("ClaimMiningRewards".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::DistributeRevenue { total_amount, .. } => {
+            ("DistributeRevenue".to_string(), None, *total_amount, None, None, None)
+        }
+        TransactionAction::ProposeAssetAction { .. } => {
+            ("ProposeAssetAction".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::VoteAssetProposal { .. } => {
+            ("VoteAssetProposal".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::FinalizeAssetProposal { .. } => {
+            ("FinalizeAssetProposal".to_string(), None, Amount::ZERO, None, None, None)
+        }
+        TransactionAction::BridgeWithdraw { destination_address, amount, .. } => {
+            ("BridgeWithdraw".to_string(), Some(*destination_address), *amount, None, None, None)
+        }
+    };
+
+    TransactionInfo {
+        hash,
+        block_number,
+        from,
+        to,
+        action_type,
+        amount,
+        nonce: tx.payload.nonce,
+        gas_price: tx.payload.gas_price,
+        gas_limit: tx.payload.gas_limit,
+        timestamp,
+        swap_pool_id,
+        swap_token_in,
+        swap_min_out,
+    }
+}
+
+/// Collect all transactions from canonical blocks (most recent first).
+fn collect_all_txs(chain: &Chain) -> Vec<TransactionInfo> {
+    let height = chain.height().unwrap_or(0);
+    let mut txs = Vec::new();
+    for n in (0..=height).rev() {
+        if let Some(block) = chain.get_block_by_number(n) {
+            let ts = block.header.timestamp;
+            let bn = block.header.number;
+            for tx in &block.transactions {
+                txs.push(tx_to_info(tx, bn, ts));
+            }
+        }
+    }
+    txs
 }
 
 /// Convert a `PoolState` into the RPC-friendly `PoolInfo`.
@@ -432,6 +717,40 @@ fn pool_state_to_info(pool: &vtt_dex::PoolState) -> PoolInfo {
     }
 }
 
+/// Convert an `AssetProposal` into the RPC-friendly `AssetProposalInfo`.
+fn proposal_to_info(p: &vtt_primitives::asset_governance::AssetProposal) -> AssetProposalInfo {
+    use vtt_primitives::asset_governance::{AssetProposalAction, AssetProposalStatus};
+
+    let action_type = match &p.action {
+        AssetProposalAction::DistributeRevenue { .. } => "DistributeRevenue",
+        AssetProposalAction::ChangeIssuer { .. } => "ChangeIssuer",
+        AssetProposalAction::Signal { .. } => "Signal",
+    }
+    .to_string();
+
+    let status = match &p.status {
+        AssetProposalStatus::Active => "Active",
+        AssetProposalStatus::Passed => "Passed",
+        AssetProposalStatus::Rejected => "Rejected",
+        AssetProposalStatus::Executed => "Executed",
+    }
+    .to_string();
+
+    AssetProposalInfo {
+        id: p.id,
+        asset_id: p.asset_id,
+        proposer: p.proposer,
+        action_type,
+        description: p.description.clone(),
+        status,
+        votes_yes: p.votes_yes,
+        votes_no: p.votes_no,
+        votes_abstain: p.votes_abstain,
+        voting_end: p.voting_end,
+        created_at: p.created_at,
+    }
+}
+
 /// The RPC server wrapper.
 pub struct RpcServer {
     state: Arc<RpcState>,
@@ -441,8 +760,18 @@ impl RpcServer {
     /// Create a new RPC server with shared state.
     pub fn new(chain: Arc<RwLock<Chain>>, txpool: Arc<RwLock<TxPool>>) -> Self {
         Self {
-            state: Arc::new(RpcState { chain, txpool }),
+            state: Arc::new(RpcState {
+                chain,
+                txpool,
+                total_burned_milli: AtomicU64::new(0),
+                total_minted_milli: AtomicU64::new(0),
+            }),
         }
+    }
+
+    /// Get a reference to the shared state (for the validator to update counters).
+    pub fn shared_state(&self) -> Arc<RpcState> {
+        self.state.clone()
     }
 
     /// Start the JSON-RPC server on the given address.

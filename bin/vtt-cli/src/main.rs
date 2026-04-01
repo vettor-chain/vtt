@@ -5,6 +5,7 @@ use jsonrpsee::http_client::HttpClientBuilder;
 use jsonrpsee::rpc_params;
 
 use vtt_crypto::Keypair;
+use vtt_genesis::GenesisConfig;
 use vtt_primitives::amount::Amount;
 use vtt_primitives::{Address, BlockNumber};
 use vtt_rpc::types::{AccountInfo, BlockInfo, ChainStatus, ValidatorInfoRpc};
@@ -24,6 +25,8 @@ fn print_usage() {
     eprintln!("  block <number>          Get block by number");
     eprintln!("  status                  Get chain status");
     eprintln!("  validators              List active validators");
+    eprintln!("  genesis                 Export default genesis config to stdout");
+    eprintln!("  genesis --out <file>    Export default genesis config to file");
 }
 
 #[tokio::main]
@@ -60,6 +63,7 @@ async fn main() {
 
     match command {
         "keygen" => cmd_keygen(&cmd_args[1..]),
+        "genesis" => cmd_genesis(&cmd_args[1..]),
         "balance" | "account" | "block" | "status" | "validators" => {
             if let Err(e) = cmd_rpc(command, &cmd_args[1..], &rpc_url).await {
                 eprintln!("Error: {e}");
@@ -71,6 +75,19 @@ async fn main() {
             print_usage();
             std::process::exit(1);
         }
+    }
+}
+
+fn cmd_genesis(args: &[String]) {
+    let config = GenesisConfig::dev_default();
+    let json = serde_json::to_string_pretty(&config).expect("failed to serialize genesis");
+
+    if args.len() >= 2 && args[0] == "--out" {
+        let path = &args[1];
+        std::fs::write(path, &json).expect("failed to write genesis file");
+        eprintln!("Genesis config written to {path}");
+    } else {
+        println!("{json}");
     }
 }
 

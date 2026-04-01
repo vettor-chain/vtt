@@ -14,6 +14,7 @@ path = "src/main.rs"
 vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-rpc = { workspace = true }
+vtt-genesis = { workspace = true }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

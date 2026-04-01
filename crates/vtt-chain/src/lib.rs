@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use vtt_consensus::engine::ConsensusError;
 use vtt_consensus::{ConsensusEngine, ValidatorSet};
 use vtt_crypto::{blake3_hash, merkle_root};
-use vtt_executor::execute_block_transactions;
+use vtt_executor::execute_block_transactions_at;
 use vtt_primitives::amount::Amount;
 use vtt_primitives::block::{Block, BlockHeader};
 use vtt_primitives::chain::GasConfig;
@@ -148,12 +148,14 @@ impl Chain {
         self.consensus
             .verify_header(&block.header, &parent_header, &self.validator_set)?;
 
-        // 6. Execute transactions
-        let (receipts, _total_gas) = execute_block_transactions(
+        // 6. Execute transactions with block context from header
+        let (receipts, _total_gas) = execute_block_transactions_at(
             &mut self.state,
             &block.transactions,
             &self.gas_config,
             block.header.gas_limit,
+            block.header.number,
+            block.header.timestamp,
         );
 
         // 7. Verify state root
@@ -520,11 +522,13 @@ mod tests {
         let tx_root = merkle_root(&[tx_hash]);
 
         // Execute the transaction to get the resulting state root
-        let (receipts_pre, gas_used) = execute_block_transactions(
+        let (receipts_pre, gas_used) = execute_block_transactions_at(
             chain.state_mut(),
             &[tx.clone()],
             &GasConfig::default(),
             10_000_000,
+            0,
+            0,
         );
         let state_root = chain.state_mut().compute_state_root();
         let receipts_root = merkle_root(

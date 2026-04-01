@@ -206,6 +206,25 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
     vusdt_ownership.credit(vusdt_supply);
     state.put_ownership(vusdt_ownership);
 
+    // Create VTT/vUSDT liquidity pool at launchpad price (~$0.108/VTT)
+    // 100,000 VTT paired with 10,800 vUSDT
+    let pool_vtt_amount = Amount::from_vtt(100_000); // 100K VTT (18 decimals)
+    let pool_usdt_amount = Amount::from_raw(10_800_000_000); // 10,800 vUSDT (6 decimals)
+
+    // Create the pool (token_a = native VTT = H256::ZERO, token_b = vUSDT)
+    // create_pool handles debiting both tokens from the treasury
+    let pool = vtt_dex::liquidity::create_pool(
+        state,
+        &treasury,
+        H256::ZERO,
+        vusdt_id,
+        pool_vtt_amount,
+        pool_usdt_amount,
+        0, // epoch 0
+    )
+    .expect("pool creation failed");
+    vtt_dex::liquidity::save_pool(state, &pool).expect("pool save failed");
+
     // VTT-REV — asset id derived from blake3_hash(b"asset:VTT-REV")
     let vttrev_id = blake3_hash(b"asset:VTT-REV");
     let vttrev_supply = Amount::from_raw(10_000); // 10,000 tokens, 0 decimals
@@ -274,8 +293,8 @@ mod tests {
         let val_addr = Keypair::from_seed(&[0x10; 32]).address();
         let val_account = result.state.get_account(&val_addr);
 
-        // Balance should be 500k - 100k stake = 400k
-        assert_eq!(val_account.balance, Amount::from_vtt(400_000));
+        // Balance should be 500k - 100k stake - 100k pool = 300k
+        assert_eq!(val_account.balance, Amount::from_vtt(300_000));
 
         let staking = val_account.staking.unwrap();
         assert_eq!(staking.self_stake, Amount::from_vtt(100_000));
@@ -334,7 +353,8 @@ mod tests {
         assert_eq!(result.block.header.chain_id, ChainId::new(1));
         assert_ne!(result.state_root, H256::ZERO);
 
+        // Balance = 10M allocation - 100K for DEX pool
         let balance = result.state.get_balance(&Address::from([0xAA; 20]));
-        assert_eq!(balance, Amount::from_vtt(10_000_000));
+        assert_eq!(balance, Amount::from_vtt(9_900_000));
     }
 }

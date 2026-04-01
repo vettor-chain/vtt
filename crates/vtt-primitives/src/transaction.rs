@@ -2,6 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::amount::Amount;
+use crate::asset_governance::AssetProposalAction;
 use crate::{Address, ChainId, PublicKey, Signature, Vote, H256};
 
 /// The payload of a transaction (everything that gets signed).
@@ -97,6 +98,45 @@ pub enum TransactionAction {
     },
     ClaimMiningRewards {
         pool_id: H256,
+    },
+
+    /// Distribute revenue to all holders of an asset, proportional to their holdings.
+    DistributeRevenue {
+        asset_id: H256,
+        /// Total VTT amount to distribute (taken from sender's balance).
+        total_amount: Amount,
+    },
+
+    /// Propose an action on an asset (only token holders can propose).
+    ProposeAssetAction {
+        asset_id: H256,
+        action: AssetProposalAction,
+        description: String,
+    },
+
+    /// Vote on an asset proposal (weight = token holdings).
+    VoteAssetProposal {
+        proposal_id: H256,
+        vote: Vote,
+    },
+
+    /// Finalize an asset proposal after the voting period ends.
+    FinalizeAssetProposal {
+        proposal_id: H256,
+    },
+
+    /// Bridge withdraw: burn tokens on VTT chain for release on external chain.
+    /// For native VTT: burns VTT, to be minted as wVTT on Ethereum.
+    /// For assets (e.g. vUSDT): burns asset tokens, to be released as real tokens on Ethereum.
+    BridgeWithdraw {
+        /// H256::ZERO for native VTT, or asset ID for tokens like vUSDT
+        token: H256,
+        /// Amount to withdraw (burned on VTT chain)
+        amount: Amount,
+        /// Destination chain identifier (e.g. 1 for Ethereum mainnet, 11155111 for Sepolia)
+        destination_chain: u32,
+        /// Destination address on the external chain (20 bytes for EVM)
+        destination_address: Address,
     },
 }
 
@@ -254,6 +294,30 @@ mod tests {
                 payload: CrossChainPayload::VttTransfer {
                     amount: Amount::from_vtt(10),
                 },
+            },
+            TransactionAction::DistributeRevenue {
+                asset_id: H256::ZERO,
+                total_amount: Amount::from_vtt(1_000),
+            },
+            TransactionAction::ProposeAssetAction {
+                asset_id: H256::ZERO,
+                action: crate::asset_governance::AssetProposalAction::Signal {
+                    description: "test proposal".to_string(),
+                },
+                description: "test".to_string(),
+            },
+            TransactionAction::VoteAssetProposal {
+                proposal_id: H256::ZERO,
+                vote: Vote::Yes,
+            },
+            TransactionAction::FinalizeAssetProposal {
+                proposal_id: H256::ZERO,
+            },
+            TransactionAction::BridgeWithdraw {
+                token: H256::ZERO,
+                amount: Amount::from_vtt(100),
+                destination_chain: 1,
+                destination_address: Address::from([0xAA; 20]),
             },
         ];
 

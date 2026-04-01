@@ -3,9 +3,12 @@ use tracing::debug;
 
 use vtt_crypto::{blake3_hash, verify};
 use vtt_primitives::amount::Amount;
+use vtt_primitives::asset_governance::{
+    AssetProposal, AssetProposalAction, AssetProposalStatus, ASSET_VOTING_PERIOD_BLOCKS,
+};
 use vtt_primitives::chain::GasConfig;
 use vtt_primitives::transaction::{Log, SignedTransaction, TransactionAction, TransactionReceipt};
-use vtt_primitives::{Address, ChainId, H256};
+use vtt_primitives::{Address, ChainId, Vote, H256};
 use vtt_state::account::AccountState;
 use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus};
 use vtt_state::StateDB;
@@ -50,6 +53,19 @@ pub fn execute_block_transactions(
     gas_config: &GasConfig,
     block_gas_limit: u64,
 ) -> (Vec<TransactionReceipt>, u64) {
+    execute_block_transactions_at(state, transactions, gas_config, block_gas_limit, 0, 0)
+}
+
+/// Execute a batch of signed transactions at a given block height and timestamp.
+/// Returns receipts for each transaction and total gas used.
+pub fn execute_block_transactions_at(
+    state: &mut StateDB,
+    transactions: &[SignedTransaction],
+    gas_config: &GasConfig,
+    block_gas_limit: u64,
+    block_number: u64,
+    block_timestamp: u64,
+) -> (Vec<TransactionReceipt>, u64) {
     let mut receipts = Vec::with_capacity(transactions.len());
     let mut total_gas = 0u64;
 
@@ -58,7 +74,7 @@ pub fn execute_block_transactions(
             break;
         }
 
-        let result = execute_transaction(state, tx, gas_config);
+        let result = execute_transaction_at(state, tx, gas_config, block_number, block_timestamp);
         total_gas += result.gas_used;
         receipts.push(result.receipt);
     }
@@ -66,11 +82,22 @@ pub fn execute_block_transactions(
     (receipts, total_gas)
 }
 
-/// Execute a single signed transaction.
+/// Execute a single signed transaction (block_number and block_timestamp default to 0).
 pub fn execute_transaction(
     state: &mut StateDB,
     tx: &SignedTransaction,
     gas_config: &GasConfig,
+) -> ExecutionResult {
+    execute_transaction_at(state, tx, gas_config, 0, 0)
+}
+
+/// Execute a single signed transaction at a given block height and timestamp.
+pub fn execute_transaction_at(
+    state: &mut StateDB,
+    tx: &SignedTransaction,
+    gas_config: &GasConfig,
+    block_number: u64,
+    block_timestamp: u64,
 ) -> ExecutionResult {
     let tx_hash = blake3_hash(&borsh::to_vec(&tx.payload).unwrap());
 
@@ -110,6 +137,12 @@ pub fn execute_transaction(
         TransactionAction::Transfer { amount, .. } => gas_fee.checked_add(*amount),
         TransactionAction::Stake { amount, .. } => gas_fee.checked_add(*amount),
         TransactionAction::CallContract { value, .. } => gas_fee.checked_add(*value),
+        TransactionAction::DistributeRevenue { total_amount, .. } => {
+            gas_fee.checked_add(*total_amount)
+        }
+        TransactionAction::BridgeWithdraw { token, amount, .. } if *token == H256::ZERO => {
+            gas_fee.checked_add(*amount)
+        }
         _ => Some(gas_fee),
     };
 
@@ -139,7 +172,15 @@ pub fn execute_transaction(
     state.increment_nonce(&sender);
 
     // 8. Execute the action
-    let exec_result = execute_action(state, &sender, &tx.payload.action);
+    let exec_result = execute_action(
+        state,
+        &sender,
+        &tx.payload.action,
+        block_number,
+        block_timestamp,
+        tx.payload.nonce,
+        tx.payload.gas_limit,
+    );
 
     match exec_result {
         Ok(logs) => ExecutionResult {
@@ -167,6 +208,10 @@ fn execute_action(
     state: &mut StateDB,
     sender: &Address,
     action: &TransactionAction,
+    block_number: u64,
+    block_timestamp: u64,
+    nonce: u64,
+    gas_limit: u64,
 ) -> Result<Vec<Log>, ExecutionError> {
     match action {
         TransactionAction::Transfer { to, amount } => {
@@ -215,7 +260,10 @@ fn execute_action(
             method,
             args,
             value,
-        } => execute_call_contract(state, sender, contract, method, args, *value),
+        } => execute_call_contract(
+            state, sender, contract, method, args, *value,
+            block_number, block_timestamp, gas_limit,
+        ),
 
         TransactionAction::CreateAssetClass {
             name,
@@ -343,6 +391,43 @@ fn execute_action(
                 topics: vec![blake3_hash(b"ClaimMiningRewards"), *pool_id],
                 data: vec![],
             }])
+        }
+
+        TransactionAction::DistributeRevenue {
+            asset_id,
+            total_amount,
+        } => {
+            execute_distribute_revenue(state, sender, asset_id, *total_amount)
+        }
+
+        TransactionAction::ProposeAssetAction {
+            asset_id,
+            action,
+            description,
+        } => {
+            execute_propose_asset_action(state, sender, asset_id, action, description, block_number, nonce)
+        }
+
+        TransactionAction::VoteAssetProposal {
+            proposal_id,
+            vote,
+        } => {
+            execute_vote_asset_proposal(state, sender, proposal_id, *vote, block_number)
+        }
+
+        TransactionAction::FinalizeAssetProposal {
+            proposal_id,
+        } => {
+            execute_finalize_asset_proposal(state, sender, proposal_id, block_number)
+        }
+
+        TransactionAction::BridgeWithdraw {
+            token,
+            amount,
+            destination_chain,
+            destination_address,
+        } => {
+            execute_bridge_withdraw(state, sender, token, *amount, *destination_chain, destination_address)
         }
     }
 }
@@ -511,6 +596,9 @@ fn execute_call_contract(
     method: &str,
     args: &[u8],
     value: Amount,
+    block_number: u64,
+    block_timestamp: u64,
+    gas_limit: u64,
 ) -> Result<Vec<Log>, ExecutionError> {
     let contract_account = state.get_account(contract);
     let code_hash = contract_account
@@ -527,17 +615,28 @@ fn execute_call_contract(
         state.transfer(sender, contract, value)?;
     }
 
+    // Load existing contract storage from StateDB into the execution context
+    let existing_storage = state.load_contract_storage(contract);
+
     let mut engine = VmEngine::new();
     let ctx = ExecutionContext::new(ExecutionParams {
         contract_address: *contract,
         caller: *sender,
         origin: *sender,
         value,
-        block_number: 0, // TODO: pass actual block number
-        block_timestamp: 0,
+        block_number,
+        block_timestamp,
         chain_id: vtt_primitives::ChainId::RELAY,
-        gas_limit: 1_000_000,
+        gas_limit,
     });
+
+    // Pre-populate the execution context with existing storage
+    {
+        let mut storage = ctx.storage.lock().unwrap();
+        for (key, val) in existing_storage {
+            storage.insert(key, val);
+        }
+    }
 
     let result = engine
         .execute(&code, method, args, ctx.clone())
@@ -552,6 +651,23 @@ fn execute_call_contract(
                 result.status
             )),
         ));
+    }
+
+    // Persist storage changes back to StateDB
+    {
+        let storage = ctx.storage.lock().unwrap();
+        for (key, val) in storage.iter() {
+            state.put_contract_storage(*contract, key.clone(), val.clone());
+        }
+    }
+
+    // Process balance changes from the execution context
+    for change in ctx.take_balance_changes() {
+        if change.is_credit {
+            state.add_balance(&change.address, change.amount)?;
+        } else {
+            state.sub_balance(&change.address, change.amount)?;
+        }
     }
 
     // Collect logs from execution context
@@ -605,6 +721,369 @@ fn execute_create_asset(
     Ok(())
 }
 
+/// Execute on-chain revenue distribution: debit VTT from sender (the asset issuer)
+/// and credit each holder proportionally to their available holdings.
+fn execute_distribute_revenue(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+    total_amount: Amount,
+) -> Result<Vec<Log>, ExecutionError> {
+    if total_amount.is_zero() {
+        return Err(ExecutionError::Custom(
+            "distribution amount must be non-zero".into(),
+        ));
+    }
+
+    // Verify asset exists and sender is the issuer
+    let asset = state
+        .get_asset(asset_id)
+        .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+    if asset.issuer != *sender {
+        return Err(ExecutionError::Custom(
+            "only the asset issuer can distribute revenue".into(),
+        ));
+    }
+    let total_supply = asset.total_supply;
+    if total_supply.is_zero() {
+        return Err(ExecutionError::Custom(
+            "asset has zero total supply".into(),
+        ));
+    }
+
+    // Collect holders snapshot (we need to iterate first, then mutate state)
+    let holders: Vec<(Address, Amount)> = state
+        .iter_ownership_for_asset(asset_id)
+        .filter(|r| !r.available.is_zero())
+        .map(|r| (r.owner, r.available))
+        .collect();
+
+    if holders.is_empty() {
+        return Err(ExecutionError::Custom(
+            "no holders with available balance".into(),
+        ));
+    }
+
+    // Debit total_amount from sender's VTT balance
+    state.sub_balance(sender, total_amount)?;
+
+    // Distribute pro-rata: share = holder_available * total_amount / total_supply
+    // Use u256-style math via u128 with careful ordering to avoid overflow:
+    // share = (holder_available.raw() as u128) * (total_amount.raw() as u128) / (total_supply.raw() as u128)
+    // We use checked arithmetic with intermediate widening to u128 (already u128, so no overflow issue
+    // for realistic amounts).
+    let mut distributed = Amount::ZERO;
+    let mut num_recipients = 0u64;
+    for (holder_addr, holder_available) in &holders {
+        // Use u128 multiplication; the product could overflow u128 for very large amounts,
+        // so we use a simple safe helper: a * b / c with u128.
+        let share_raw = mul_div(holder_available.raw(), total_amount.raw(), total_supply.raw());
+        if share_raw > 0 {
+            let share = Amount::from_raw(share_raw);
+            state.add_balance(holder_addr, share)?;
+            distributed = distributed + share;
+            num_recipients += 1;
+        }
+    }
+
+    // Remainder (due to rounding) goes back to sender
+    if let Some(remainder) = total_amount.checked_sub(distributed) {
+        if !remainder.is_zero() {
+            state.add_balance(sender, remainder)?;
+        }
+    }
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"DistributeRevenue"), *asset_id],
+        data: borsh::to_vec(&(*sender, *asset_id, total_amount.raw(), num_recipients)).unwrap(),
+    }])
+}
+
+/// Execute a ProposeAssetAction transaction.
+fn execute_propose_asset_action(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+    action: &AssetProposalAction,
+    description: &str,
+    block_number: u64,
+    nonce: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    // Verify the asset exists
+    let asset = state
+        .get_asset(asset_id)
+        .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+
+    // Verify sender holds > 0 tokens of this asset
+    let ownership = state.get_ownership(asset_id, sender);
+    if ownership.available.is_zero() {
+        return Err(ExecutionError::Custom(
+            "only token holders can propose asset actions".into(),
+        ));
+    }
+
+    // If action is DistributeRevenue, verify sender has enough VTT balance
+    // (don't debit yet - debit on execution)
+    if let AssetProposalAction::DistributeRevenue { total_amount } = action {
+        let sender_balance = state.get_balance(sender);
+        if sender_balance < *total_amount {
+            return Err(ExecutionError::InsufficientBalance {
+                have: sender_balance,
+                need: *total_amount,
+            });
+        }
+    }
+
+    // Create proposal with unique ID (blake3 hash of asset_id + proposer + block_number + nonce)
+    let id_data = borsh::to_vec(&(*asset_id, *sender, block_number, nonce)).unwrap();
+    let proposal_id = blake3_hash(&id_data);
+
+    let _ = asset; // used above for existence check
+
+    let proposal = AssetProposal {
+        id: proposal_id,
+        asset_id: *asset_id,
+        proposer: *sender,
+        action: action.clone(),
+        description: description.to_string(),
+        created_at: block_number,
+        voting_end: block_number + ASSET_VOTING_PERIOD_BLOCKS,
+        status: AssetProposalStatus::Active,
+        votes_yes: Amount::ZERO,
+        votes_no: Amount::ZERO,
+        votes_abstain: Amount::ZERO,
+        voters: Vec::new(),
+    };
+
+    state.put_asset_proposal(proposal);
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"ProposeAssetAction"), proposal_id],
+        data: borsh::to_vec(&(*sender, *asset_id, proposal_id)).unwrap(),
+    }])
+}
+
+/// Execute a VoteAssetProposal transaction.
+fn execute_vote_asset_proposal(
+    state: &mut StateDB,
+    sender: &Address,
+    proposal_id: &H256,
+    vote: Vote,
+    current_block: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    // Load proposal
+    let proposal = state
+        .get_asset_proposal(proposal_id)
+        .ok_or_else(|| ExecutionError::Custom("asset proposal not found".into()))?;
+
+    // Verify it's Active
+    if proposal.status != AssetProposalStatus::Active {
+        return Err(ExecutionError::Custom(
+            "proposal is not active".into(),
+        ));
+    }
+
+    // Verify voting hasn't ended
+    if proposal.is_voting_ended(current_block) {
+        return Err(ExecutionError::Custom(
+            "voting period has ended".into(),
+        ));
+    }
+
+    // Verify sender hasn't already voted
+    if proposal.has_voted(sender) {
+        return Err(ExecutionError::Custom(
+            "already voted on this proposal".into(),
+        ));
+    }
+
+    // Get sender's token balance for the proposal's asset_id
+    let asset_id = proposal.asset_id;
+    let ownership = state.get_ownership(&asset_id, sender);
+    let voting_power = ownership.available;
+
+    // Verify balance > 0
+    if voting_power.is_zero() {
+        return Err(ExecutionError::Custom(
+            "no token holdings to vote with".into(),
+        ));
+    }
+
+    // Add vote weight
+    let proposal_mut = state
+        .get_asset_proposal_mut(proposal_id)
+        .ok_or_else(|| ExecutionError::Custom("asset proposal not found".into()))?;
+
+    match vote {
+        Vote::Yes => proposal_mut.votes_yes = proposal_mut.votes_yes + voting_power,
+        Vote::No => proposal_mut.votes_no = proposal_mut.votes_no + voting_power,
+        Vote::Abstain => proposal_mut.votes_abstain = proposal_mut.votes_abstain + voting_power,
+    }
+
+    proposal_mut.voters.push(*sender);
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"VoteAssetProposal"), *proposal_id],
+        data: borsh::to_vec(&(*sender, vote as u8, voting_power.raw())).unwrap(),
+    }])
+}
+
+/// Execute a FinalizeAssetProposal transaction.
+fn execute_finalize_asset_proposal(
+    state: &mut StateDB,
+    sender: &Address,
+    proposal_id: &H256,
+    current_block: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    // Load proposal and clone needed fields to avoid borrow issues
+    let proposal = state
+        .get_asset_proposal(proposal_id)
+        .ok_or_else(|| ExecutionError::Custom("asset proposal not found".into()))?;
+
+    // Verify it's Active
+    if proposal.status != AssetProposalStatus::Active {
+        return Err(ExecutionError::Custom(
+            "proposal is not active".into(),
+        ));
+    }
+
+    // Verify voting period has ended
+    if !proposal.is_voting_ended(current_block) {
+        return Err(ExecutionError::Custom(
+            "voting period has not ended yet".into(),
+        ));
+    }
+
+    // Get the asset's total supply for quorum calculation
+    let asset_id = proposal.asset_id;
+    let asset = state
+        .get_asset(&asset_id)
+        .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+    let total_supply = asset.total_supply;
+
+    // Clone action and proposer before mutating state
+    let action = proposal.action.clone();
+    let proposer = proposal.proposer;
+
+    // Check quorum: total votes >= ASSET_QUORUM_BPS of total_supply
+    let has_quorum = proposal.has_quorum(total_supply);
+
+    // Check threshold based on action type
+    let passes = if has_quorum {
+        match &action {
+            AssetProposalAction::ChangeIssuer { .. } => proposal.passes_supermajority(),
+            _ => proposal.passes_threshold(),
+        }
+    } else {
+        false
+    };
+
+    if passes {
+        // Execute the action
+        match &action {
+            AssetProposalAction::DistributeRevenue { total_amount } => {
+                // Debit VTT from proposer, distribute pro-rata to all holders
+                execute_distribute_revenue(state, &proposer, &asset_id, *total_amount)?;
+            }
+            AssetProposalAction::ChangeIssuer { new_issuer } => {
+                // Update the asset's issuer field
+                let asset_mut = state
+                    .get_asset_mut(&asset_id)
+                    .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+                asset_mut.issuer = *new_issuer;
+            }
+            AssetProposalAction::Signal { .. } => {
+                // No on-chain action for signal proposals
+            }
+        }
+
+        // Mark as Executed
+        let proposal_mut = state
+            .get_asset_proposal_mut(proposal_id)
+            .ok_or_else(|| ExecutionError::Custom("asset proposal not found".into()))?;
+        proposal_mut.status = AssetProposalStatus::Executed;
+    } else {
+        // Mark as Rejected
+        let proposal_mut = state
+            .get_asset_proposal_mut(proposal_id)
+            .ok_or_else(|| ExecutionError::Custom("asset proposal not found".into()))?;
+        proposal_mut.status = AssetProposalStatus::Rejected;
+    }
+
+    let final_status = state.get_asset_proposal(proposal_id).unwrap().status.clone();
+    let status_str = match &final_status {
+        AssetProposalStatus::Executed => "Executed",
+        AssetProposalStatus::Rejected => "Rejected",
+        _ => "Unknown",
+    };
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"FinalizeAssetProposal"), *proposal_id],
+        data: borsh::to_vec(&(*sender, *proposal_id, status_str)).unwrap(),
+    }])
+}
+
+/// Execute a bridge withdrawal: burn tokens on VTT chain.
+/// A backend relayer watches for these logs and releases tokens on the destination chain.
+fn execute_bridge_withdraw(
+    state: &mut StateDB,
+    sender: &Address,
+    token: &H256,
+    amount: Amount,
+    destination_chain: u32,
+    destination_address: &Address,
+) -> Result<Vec<Log>, ExecutionError> {
+    if amount.is_zero() {
+        return Err(ExecutionError::Custom(
+            "bridge withdraw amount must be non-zero".into(),
+        ));
+    }
+
+    if *token == H256::ZERO {
+        // Native VTT: burn by debiting sender balance
+        state.sub_balance(sender, amount)?;
+    } else {
+        // Asset token: verify asset exists, then burn by transferring to Address::ZERO
+        if state.get_asset(token).is_none() {
+            return Err(ExecutionError::Custom(format!("asset not found: {token}")));
+        }
+        state.transfer_asset(token, sender, &Address::ZERO, amount)?;
+    }
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"BridgeWithdraw"), *token],
+        data: borsh::to_vec(&(*sender, *token, amount, destination_chain, *destination_address)).unwrap(),
+    }])
+}
+
+/// Safe integer math: a * b / c without overflow using u128.
+/// For amounts up to ~3.4e38 (u128 max), the product a*b can overflow.
+/// We widen to (u128, u128) pair representing a 256-bit value when needed.
+fn mul_div(a: u128, b: u128, c: u128) -> u128 {
+    // Use u128 directly when possible; otherwise fall back to widening.
+    if let Some(product) = a.checked_mul(b) {
+        product / c
+    } else {
+        // a * b overflows u128. Use decomposition: a = q*c + r, so
+        // a*b/c = q*b + r*b/c, which avoids the full product.
+        let q1 = (a / c) * b;
+        let r1 = a % c;
+        // r1 < c, so r1 * b may still overflow — handle recursively
+        let q2 = if let Some(prod) = r1.checked_mul(b) {
+            prod / c
+        } else {
+            // Both factors large; decompose again
+            (r1 / c) * b + (r1 % c) * (b / c)
+        };
+        q1 + q2
+    }
+}
+
 /// Calculate gas cost for an action.
 fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
     match action {
@@ -627,6 +1106,11 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::Swap { .. } => 25_000,
         TransactionAction::ClaimRevenue { .. } => 10_000,
         TransactionAction::ClaimMiningRewards { .. } => 10_000,
+        TransactionAction::DistributeRevenue { .. } => 50_000,
+        TransactionAction::ProposeAssetAction { .. } => 100_000,
+        TransactionAction::VoteAssetProposal { .. } => 30_000,
+        TransactionAction::FinalizeAssetProposal { .. } => 100_000,
+        TransactionAction::BridgeWithdraw { .. } => 50_000,
     }
 }
 

@@ -33,6 +33,8 @@ pub struct ExecutionContext {
     pub logs: Arc<Mutex<Vec<Log>>>,
     /// Balance changes to apply after execution (address -> delta).
     pub balance_changes: Arc<Mutex<Vec<BalanceChange>>>,
+    /// WASM linear memory reference, set after instantiation.
+    pub wasm_memory: Arc<Mutex<Option<wasmer::Memory>>>,
 }
 
 /// A pending balance change from contract execution.
@@ -69,6 +71,7 @@ impl ExecutionContext {
             storage: Arc::new(Mutex::new(HashMap::new())),
             logs: Arc::new(Mutex::new(Vec::new())),
             balance_changes: Arc::new(Mutex::new(Vec::new())),
+            wasm_memory: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -117,6 +120,11 @@ impl ExecutionContext {
     /// Get all pending balance changes.
     pub fn take_balance_changes(&self) -> Vec<BalanceChange> {
         std::mem::take(&mut *self.balance_changes.lock().unwrap())
+    }
+
+    /// Set the WASM linear memory reference (called after instantiation).
+    pub fn set_memory(&self, memory: wasmer::Memory) {
+        *self.wasm_memory.lock().unwrap() = Some(memory);
     }
 
     /// Get gas used.

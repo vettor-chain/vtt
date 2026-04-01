@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use vtt_primitives::amount::Amount;
+use vtt_primitives::asset_governance::AssetProposal;
 use vtt_primitives::{Address, H256};
 
 use crate::account::AccountState;
@@ -37,8 +38,12 @@ pub struct StateDB {
     oracles: HashMap<H256, OracleFeed>,
     /// Contract code storage: code_hash -> bytecode.
     contract_code: HashMap<H256, Vec<u8>>,
+    /// Contract storage: (contract_address, key) -> value.
+    contract_storage: HashMap<(Address, Vec<u8>), Vec<u8>>,
     /// Pool storage: pool_id -> raw serialized pool data.
     pools: HashMap<H256, Vec<u8>>,
+    /// Asset governance proposals: proposal_id -> AssetProposal.
+    asset_proposals: HashMap<H256, AssetProposal>,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
@@ -58,7 +63,9 @@ impl StateDB {
             ownership: HashMap::new(),
             oracles: HashMap::new(),
             contract_code: HashMap::new(),
+            contract_storage: HashMap::new(),
             pools: HashMap::new(),
+            asset_proposals: HashMap::new(),
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -238,6 +245,18 @@ impl StateDB {
         Ok(())
     }
 
+    /// Iterate all ownership records for a given asset.
+    pub fn iter_ownership_for_asset(
+        &self,
+        asset_id: &H256,
+    ) -> impl Iterator<Item = &OwnershipRecord> {
+        let asset_id = *asset_id;
+        self.ownership
+            .iter()
+            .filter(move |((aid, _), _)| *aid == asset_id)
+            .map(|(_, record)| record)
+    }
+
     /// Get the number of registered assets.
     pub fn asset_count(&self) -> usize {
         self.assets.len()
@@ -246,6 +265,37 @@ impl StateDB {
     /// Iterate over all assets.
     pub fn iter_assets(&self) -> impl Iterator<Item = (&H256, &AssetRecord)> {
         self.assets.iter()
+    }
+
+    // --- Asset Governance Proposal Methods ---
+
+    /// Get an asset proposal by ID.
+    pub fn get_asset_proposal(&self, id: &H256) -> Option<&AssetProposal> {
+        self.asset_proposals.get(id)
+    }
+
+    /// Get a mutable reference to an asset proposal by ID.
+    pub fn get_asset_proposal_mut(&mut self, id: &H256) -> Option<&mut AssetProposal> {
+        self.asset_proposals.get_mut(id)
+    }
+
+    /// Store an asset proposal.
+    pub fn put_asset_proposal(&mut self, proposal: AssetProposal) {
+        self.asset_proposals.insert(proposal.id, proposal);
+    }
+
+    /// Iterate over all asset proposals.
+    pub fn iter_asset_proposals(&self) -> impl Iterator<Item = (&H256, &AssetProposal)> {
+        self.asset_proposals.iter()
+    }
+
+    /// Get all proposals for a given asset.
+    pub fn iter_asset_proposals_for_asset(&self, asset_id: &H256) -> Vec<&AssetProposal> {
+        let asset_id = *asset_id;
+        self.asset_proposals
+            .values()
+            .filter(move |p| p.asset_id == asset_id)
+            .collect()
     }
 
     // --- Oracle Methods ---
@@ -289,6 +339,36 @@ impl StateDB {
     /// Get contract bytecode by code hash.
     pub fn get_code(&self, code_hash: &H256) -> Option<&Vec<u8>> {
         self.contract_code.get(code_hash)
+    }
+
+    // --- Contract Storage Methods ---
+
+    /// Read a value from a contract's storage.
+    pub fn get_contract_storage(&self, address: &Address, key: &[u8]) -> Option<Vec<u8>> {
+        self.contract_storage
+            .get(&(*address, key.to_vec()))
+            .cloned()
+    }
+
+    /// Write a value to a contract's storage.
+    pub fn put_contract_storage(&mut self, address: Address, key: Vec<u8>, value: Vec<u8>) {
+        self.dirty.push(address);
+        self.contract_storage.insert((address, key), value);
+    }
+
+    /// Delete a value from a contract's storage.
+    pub fn delete_contract_storage(&mut self, address: &Address, key: &[u8]) {
+        self.dirty.push(*address);
+        self.contract_storage.remove(&(*address, key.to_vec()));
+    }
+
+    /// Load all storage entries for a contract address into a HashMap.
+    pub fn load_contract_storage(&self, address: &Address) -> HashMap<Vec<u8>, Vec<u8>> {
+        self.contract_storage
+            .iter()
+            .filter(|((addr, _), _)| addr == address)
+            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .collect()
     }
 
     // --- Pool Methods ---
@@ -363,7 +443,9 @@ impl StateDB {
             ownership: self.ownership.clone(),
             oracles: self.oracles.clone(),
             contract_code: self.contract_code.clone(),
+            contract_storage: self.contract_storage.clone(),
             pools: self.pools.clone(),
+            asset_proposals: self.asset_proposals.clone(),
             dirty_pools: self.dirty_pools.clone(),
         }
     }
@@ -393,7 +475,9 @@ impl StateDB {
         self.ownership = snapshot.ownership;
         self.oracles = snapshot.oracles;
         self.contract_code = snapshot.contract_code;
+        self.contract_storage = snapshot.contract_storage;
         self.pools = snapshot.pools;
+        self.asset_proposals = snapshot.asset_proposals;
         self.dirty_pools = snapshot.dirty_pools;
     }
 }
@@ -412,7 +496,9 @@ pub struct StateSnapshot {
     ownership: HashMap<(H256, Address), OwnershipRecord>,
     oracles: HashMap<H256, OracleFeed>,
     contract_code: HashMap<H256, Vec<u8>>,
+    contract_storage: HashMap<(Address, Vec<u8>), Vec<u8>>,
     pools: HashMap<H256, Vec<u8>>,
+    asset_proposals: HashMap<H256, AssetProposal>,
     dirty_pools: Vec<H256>,
 }
 

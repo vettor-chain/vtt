@@ -223,6 +223,11 @@ impl TxPool {
         self.by_sender.len()
     }
 
+    /// All sender addresses with pending transactions.
+    pub fn senders(&self) -> Vec<Address> {
+        self.by_sender.keys().copied().collect()
+    }
+
     fn tx_hash(&self, tx: &SignedTransaction) -> H256 {
         blake3_hash(&borsh::to_vec(&tx.payload).unwrap())
     }
