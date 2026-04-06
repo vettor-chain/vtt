@@ -1,11 +1,12 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use vtt_primitives::block::Block;
 use vtt_primitives::transaction::SignedTransaction;
-use vtt_primitives::{BlockNumber, H256};
+use vtt_primitives::{Address, BlockNumber, Signature, H256};
 
 /// Messages exchanged between VTT nodes on the P2P network.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum NetworkMessage {
     /// Announce a new block to peers.
     BlockAnnounce {
@@ -22,13 +23,23 @@ pub enum NetworkMessage {
     BlockRequest { block_hash: H256 },
 
     /// Request a range of blocks by number.
-    BlockRangeRequest { from: BlockNumber, to: BlockNumber },
+    BlockRangeRequest {
+        request_id: u64,
+        from_number: BlockNumber,
+        count: u32,
+    },
 
     /// Response to a block request.
-    BlockResponse { block: Option<Block> },
+    BlockResponse {
+        request_id: u64,
+        block: Option<Block>,
+    },
 
     /// Response to a block range request.
-    BlockRangeResponse { blocks: Vec<Block> },
+    BlockRangeResponse {
+        request_id: u64,
+        blocks: Vec<Block>,
+    },
 
     /// Peer status exchange (handshake).
     Status {
@@ -37,17 +48,25 @@ pub enum NetworkMessage {
         best_block_number: BlockNumber,
         genesis_hash: H256,
     },
+
+    /// Finality vote from a validator.
+    FinalityVote {
+        voter: Address,
+        block_hash: H256,
+        block_number: BlockNumber,
+        signature: Signature,
+    },
 }
 
 impl NetworkMessage {
-    /// Serialize a message to JSON bytes for network transmission.
+    /// Serialize a message to Borsh bytes for network transmission.
     pub fn encode(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("message serialization failed")
+        borsh::to_vec(self).expect("message serialization failed")
     }
 
-    /// Deserialize a message from JSON bytes.
-    pub fn decode(data: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(data)
+    /// Deserialize a message from Borsh bytes.
+    pub fn decode(data: &[u8]) -> Result<Self, std::io::Error> {
+        Self::try_from_slice(data)
     }
 }
 
@@ -66,7 +85,7 @@ pub mod topics {
 mod tests {
     use super::*;
     use vtt_primitives::block::BlockHeader;
-    use vtt_primitives::{Address, ChainId, Signature};
+    use vtt_primitives::ChainId;
 
     fn test_block() -> Block {
         Block::new(

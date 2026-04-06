@@ -20,6 +20,8 @@ vtt-network = { workspace = true }
 vtt-genesis = { workspace = true }
 vtt-txpool = { workspace = true }
 vtt-rpc = { workspace = true }
+vtt-storage = { workspace = true }
+vtt-telemetry = { workspace = true }
 tokio = { workspace = true }
 borsh = { workspace = true }
 tracing = { workspace = true }

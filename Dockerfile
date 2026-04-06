@@ -3,11 +3,13 @@
 # ============================================================
 
 # Stage 1: Build
-FROM rust:1.83-slim AS builder
+FROM rust:1.85-slim AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    clang \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -16,10 +18,14 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY bin/ bin/
+COPY tests/ tests/
 
-# Build release binary
-RUN cargo build --release --bin vtt-validator \
-    && strip /build/target/release/vtt-validator
+# Build release binary (cache cargo registry + target dir across builds)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --bin vtt-validator \
+    && cp /build/target/release/vtt-validator /build/vtt-validator \
+    && strip /build/vtt-validator
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -32,7 +38,9 @@ RUN apt-get update && apt-get install -y \
 
 RUN useradd -m -u 1000 vtt
 
-COPY --from=builder /build/target/release/vtt-validator /usr/local/bin/vtt-validator
+COPY --from=builder /build/vtt-validator /usr/local/bin/vtt-validator
+
+RUN mkdir -p /data/vtt && chown vtt:vtt /data/vtt
 
 USER vtt
 WORKDIR /home/vtt

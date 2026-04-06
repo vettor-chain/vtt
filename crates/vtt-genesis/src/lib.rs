@@ -40,6 +40,58 @@ pub struct GenesisValidator {
 }
 
 impl GenesisConfig {
+    /// Create a genesis config for a multi-validator testnet (3 validators).
+    ///
+    /// Seeds (hex):
+    ///   Validator 1: `[0xA1; 32]` — primary bootnode
+    ///   Validator 2: `[0xA2; 32]`
+    ///   Validator 3: `[0xA3; 32]`
+    ///
+    /// Each validator gets 600,000 VTT (500,000 staked + 100,000 for txs).
+    /// Treasury is set to validator 1's address.
+    pub fn testnet_default() -> Self {
+        let val1_kp = Keypair::from_seed(&[0xA1; 32]);
+        let val2_kp = Keypair::from_seed(&[0xA2; 32]);
+        let val3_kp = Keypair::from_seed(&[0xA3; 32]);
+        let val1 = val1_kp.address();
+        let val2 = val2_kp.address();
+        let val3 = val3_kp.address();
+
+        // Faucet / test accounts
+        let faucet1 = Keypair::from_seed(&[0x01; 32]).address();
+        let faucet2 = Keypair::from_seed(&[0x02; 32]).address();
+
+        Self {
+            chain: ChainConfig {
+                chain_id: ChainId::RELAY,
+                name: "VTT Testnet".to_string(),
+                consensus: ConsensusParams {
+                    active_validators: 3,
+                    epoch_length: 1200, // 1 hour at 3s blocks
+                    treasury_address: val1,
+                    ..Default::default()
+                },
+                gas: GasConfig::default(),
+            },
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            allocations: vec![
+                GenesisAllocation { address: val1, balance: Amount::from_vtt(600_000) },
+                GenesisAllocation { address: val2, balance: Amount::from_vtt(600_000) },
+                GenesisAllocation { address: val3, balance: Amount::from_vtt(600_000) },
+                GenesisAllocation { address: faucet1, balance: Amount::from_vtt(1_000_000) },
+                GenesisAllocation { address: faucet2, balance: Amount::from_vtt(1_000_000) },
+            ],
+            validators: vec![
+                GenesisValidator { address: val1, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
+                GenesisValidator { address: val2, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
+                GenesisValidator { address: val3, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
+            ],
+        }
+    }
+
     /// Create a default genesis config for a development/test network.
     pub fn dev_default() -> Self {
         // Derive addresses from seeds (matching vtt-validator default seed)
@@ -55,6 +107,7 @@ impl GenesisConfig {
                 consensus: ConsensusParams {
                     active_validators: 1,
                     epoch_length: 100,
+                    treasury_address: validator_addr,
                     ..Default::default()
                 },
                 gas: GasConfig::default(),
@@ -131,7 +184,11 @@ pub fn build_genesis(config: &GenesisConfig) -> GenesisResult {
         state.put_account(validator.address, account);
     }
 
-    // 3. Create DEX genesis assets (vUSDT and VTT-REV) minted to validator (acts as treasury in dev)
+    // 3. Store chain parameters in state for use by the executor
+    state.set_treasury_address(config.chain.consensus.treasury_address);
+    state.set_epoch_length(config.chain.consensus.epoch_length);
+
+    // 4. Create DEX genesis assets (vUSDT and VTT-REV) minted to validator (acts as treasury in dev)
     let treasury = config
         .validators
         .first()
@@ -140,10 +197,10 @@ pub fn build_genesis(config: &GenesisConfig) -> GenesisResult {
         .unwrap_or(Address::ZERO);
     setup_dex_genesis(&mut state, treasury, config.chain.chain_id);
 
-    // 4. Compute state root
+    // 5. Compute state root
     let state_root = state.compute_state_root();
 
-    // 5. Build genesis block header
+    // 6. Build genesis block header
     let header = BlockHeader {
         version: 1,
         chain_id: config.chain.chain_id,
@@ -356,5 +413,55 @@ mod tests {
         // Balance = 10M allocation - 100K for DEX pool
         let balance = result.state.get_balance(&Address::from([0xAA; 20]));
         assert_eq!(balance, Amount::from_vtt(9_900_000));
+    }
+
+    #[test]
+    fn build_testnet_genesis() {
+        let config = GenesisConfig::testnet_default();
+        let result = build_genesis(&config);
+
+        assert_eq!(result.block.header.number, 0);
+        assert_ne!(result.state_root, H256::ZERO);
+        assert_eq!(config.validators.len(), 3);
+        assert_eq!(config.chain.consensus.active_validators, 3);
+        assert_eq!(config.chain.consensus.epoch_length, 1200);
+
+        // Verify all 3 validators are staked
+        for validator in &config.validators {
+            let val_account = result.state.get_account(&validator.address);
+            let staking = val_account.staking.unwrap();
+            assert_eq!(staking.self_stake, Amount::from_vtt(500_000));
+            assert!(staking.active);
+        }
+    }
+
+    #[test]
+    fn testnet_genesis_json_roundtrip() {
+        let config = GenesisConfig::testnet_default();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let config2: GenesisConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(config.chain.chain_id, config2.chain.chain_id);
+        assert_eq!(config.validators.len(), config2.validators.len());
+        assert_eq!(config2.validators.len(), 3);
+        assert_eq!(config2.chain.consensus.active_validators, 3);
+    }
+
+    #[test]
+    fn generate_testnet_genesis_file() {
+        // This test generates the genesis-testnet.json content for reference.
+        // Use a fixed timestamp so the file is deterministic.
+        let mut config = GenesisConfig::testnet_default();
+        config.timestamp = 1_711_929_600_000; // 2024-04-01T00:00:00Z
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        // Verify it parses back correctly
+        let parsed: GenesisConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.validators.len(), 3);
+        assert_eq!(parsed.chain.name, "VTT Testnet");
+
+        // Build it to verify it's valid
+        let result = build_genesis(&parsed);
+        assert_eq!(result.block.header.number, 0);
     }
 }

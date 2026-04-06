@@ -81,6 +81,7 @@ pub struct ValidatorInfoRpc {
     pub total_stake: Amount,
     pub self_stake: Amount,
     pub commission_bps: u16,
+    pub is_active: bool,
 }
 
 /// RPC response for account info.
@@ -213,6 +214,31 @@ pub struct SwapQuoteRpc {
     pub fee: String,
 }
 
+/// RPC response for token price in VTT (derived from DEX pool reserves).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenPriceRpc {
+    pub token_id: H256,
+    /// Price in VTT as raw Amount string (18 decimals).
+    pub price_in_vtt: String,
+    pub pool_id: H256,
+}
+
+/// RPC response for a single pool's spot prices.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolPriceRpc {
+    pub pool_id: H256,
+    pub token_a: H256,
+    pub token_b: H256,
+    /// How much token_b per 1 token_a (18-decimal string).
+    pub price_a_in_b: String,
+    /// How much token_a per 1 token_b (18-decimal string).
+    pub price_b_in_a: String,
+    /// Reserve of token_a.
+    pub tvl_a: String,
+    /// Reserve of token_b.
+    pub tvl_b: String,
+}
+
 /// Delegation info within staking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DelegationInfo {
@@ -262,6 +288,18 @@ pub struct BridgeWithdrawalInfo {
     pub destination_chain: u32,
     pub destination_address: Address,
     pub timestamp: u64,
+}
+
+/// Node metrics for monitoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeMetricsInfo {
+    pub block_height: i64,
+    pub connected_peers: i64,
+    pub txpool_size: i64,
+    pub blocks_imported: u64,
+    pub transactions_executed: u64,
+    pub current_epoch: i64,
+    pub active_validators: i64,
 }
 
 #[cfg(test)]

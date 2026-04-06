@@ -18,4 +18,5 @@ vtt-genesis = { workspace = true }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+borsh = { workspace = true }
 hex = "0.4"

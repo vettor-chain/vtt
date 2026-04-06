@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use thiserror::Error;
 use tracing::{debug, info};
@@ -13,6 +14,7 @@ use vtt_primitives::chain::GasConfig;
 use vtt_primitives::transaction::TransactionReceipt;
 use vtt_primitives::{Address, BlockNumber, H256};
 use vtt_state::StateDB;
+use vtt_storage::{Column, KeyValueStore};
 
 #[derive(Debug, Error)]
 pub enum ChainError {
@@ -44,7 +46,8 @@ pub struct ImportResult {
 
 /// The blockchain: manages block storage, state, and the canonical chain.
 ///
-/// Uses a longest-chain fork choice rule.
+/// Uses a longest-chain fork choice rule. Optionally backed by persistent
+/// storage (RocksDB) for blocks, headers, and canonical index.
 pub struct Chain {
     /// Block headers indexed by hash.
     headers: HashMap<H256, BlockHeader>,
@@ -62,10 +65,12 @@ pub struct Chain {
     gas_config: GasConfig,
     /// Current active validator set.
     validator_set: ValidatorSet,
+    /// Optional persistent storage for blocks.
+    storage: Option<Arc<dyn KeyValueStore>>,
 }
 
 impl Chain {
-    /// Create a new empty chain.
+    /// Create a new empty chain (in-memory only).
     pub fn new(consensus: ConsensusEngine, gas_config: GasConfig) -> Self {
         Self {
             headers: HashMap::new(),
@@ -76,6 +81,27 @@ impl Chain {
             consensus,
             gas_config,
             validator_set: ValidatorSet::empty(0),
+            storage: None,
+        }
+    }
+
+    /// Create a new chain backed by persistent storage.
+    pub fn with_storage(
+        consensus: ConsensusEngine,
+        gas_config: GasConfig,
+        storage: Arc<dyn KeyValueStore>,
+    ) -> Self {
+        let state = StateDB::with_storage(storage.clone());
+        Self {
+            headers: HashMap::new(),
+            bodies: HashMap::new(),
+            canonical: HashMap::new(),
+            head_hash: None,
+            state,
+            consensus,
+            gas_config,
+            validator_set: ValidatorSet::empty(0),
+            storage: Some(storage),
         }
     }
 
@@ -88,6 +114,19 @@ impl Chain {
         let block_hash = blake3_hash(&genesis_block.header.signable_bytes());
 
         info!(?block_hash, "initializing chain with genesis block");
+
+        // If we have persistent storage, merge it into the genesis state
+        if let Some(ref storage) = self.storage {
+            // Persist genesis block
+            if let Ok(header_bytes) = borsh::to_vec(&genesis_block.header) {
+                let _ = storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes);
+            }
+            if let Ok(block_bytes) = borsh::to_vec(&genesis_block) {
+                let _ = storage.put(Column::BlockBodies, block_hash.as_bytes(), &block_bytes);
+            }
+            let _ = storage.put(Column::ChainIndex, b"canonical:0", block_hash.as_bytes());
+            let _ = storage.put(Column::ChainMeta, b"head_hash", block_hash.as_bytes());
+        }
 
         self.state = genesis_state;
 
@@ -156,6 +195,7 @@ impl Chain {
             block.header.gas_limit,
             block.header.number,
             block.header.timestamp,
+            block.header.chain_id,
         );
 
         // 7. Verify state root
@@ -168,12 +208,25 @@ impl Chain {
         }
 
         // 8. Store block
+        if let Some(ref storage) = self.storage {
+            if let Ok(header_bytes) = borsh::to_vec(&block.header) {
+                let _ = storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes);
+            }
+            if let Ok(block_bytes) = borsh::to_vec(&block) {
+                let _ = storage.put(Column::BlockBodies, block_hash.as_bytes(), &block_bytes);
+            }
+        }
         self.headers.insert(block_hash, block.header.clone());
         self.bodies.insert(block_hash, block.clone());
 
         // 9. Fork choice: longest chain wins
         let is_new_head = self.is_new_head(&block.header);
         if is_new_head {
+            if let Some(ref storage) = self.storage {
+                let key = format!("canonical:{}", block.header.number);
+                let _ = storage.put(Column::ChainIndex, key.as_bytes(), block_hash.as_bytes());
+                let _ = storage.put(Column::ChainMeta, b"head_hash", block_hash.as_bytes());
+            }
             self.canonical.insert(block.header.number, block_hash);
             self.head_hash = Some(block_hash);
             debug!(number = block.header.number, ?block_hash, "new chain head");
@@ -529,6 +582,7 @@ mod tests {
             10_000_000,
             0,
             0,
+            ChainId::RELAY,
         );
         let state_root = chain.state_mut().compute_state_root();
         let receipts_root = merkle_root(

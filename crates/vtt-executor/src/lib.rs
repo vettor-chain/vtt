@@ -1,6 +1,8 @@
+use borsh::BorshDeserialize;
 use thiserror::Error;
 use tracing::debug;
 
+use vtt_consensus::governance::{GovernanceSystem, Proposal, ProposalAction};
 use vtt_crypto::{blake3_hash, verify};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::asset_governance::{
@@ -53,10 +55,11 @@ pub fn execute_block_transactions(
     gas_config: &GasConfig,
     block_gas_limit: u64,
 ) -> (Vec<TransactionReceipt>, u64) {
-    execute_block_transactions_at(state, transactions, gas_config, block_gas_limit, 0, 0)
+    execute_block_transactions_at(state, transactions, gas_config, block_gas_limit, 0, 0, ChainId::RELAY)
 }
 
 /// Execute a batch of signed transactions at a given block height and timestamp.
+/// Validates that each transaction's chain_id matches the expected `chain_id`.
 /// Returns receipts for each transaction and total gas used.
 pub fn execute_block_transactions_at(
     state: &mut StateDB,
@@ -65,6 +68,7 @@ pub fn execute_block_transactions_at(
     block_gas_limit: u64,
     block_number: u64,
     block_timestamp: u64,
+    chain_id: ChainId,
 ) -> (Vec<TransactionReceipt>, u64) {
     let mut receipts = Vec::with_capacity(transactions.len());
     let mut total_gas = 0u64;
@@ -74,7 +78,7 @@ pub fn execute_block_transactions_at(
             break;
         }
 
-        let result = execute_transaction_at(state, tx, gas_config, block_number, block_timestamp);
+        let result = execute_transaction_at(state, tx, gas_config, block_number, block_timestamp, chain_id);
         total_gas += result.gas_used;
         receipts.push(result.receipt);
     }
@@ -88,18 +92,34 @@ pub fn execute_transaction(
     tx: &SignedTransaction,
     gas_config: &GasConfig,
 ) -> ExecutionResult {
-    execute_transaction_at(state, tx, gas_config, 0, 0)
+    execute_transaction_at(state, tx, gas_config, 0, 0, ChainId::RELAY)
 }
 
 /// Execute a single signed transaction at a given block height and timestamp.
+/// Rejects transactions whose chain_id does not match the expected `chain_id`.
 pub fn execute_transaction_at(
     state: &mut StateDB,
     tx: &SignedTransaction,
     gas_config: &GasConfig,
     block_number: u64,
     block_timestamp: u64,
+    chain_id: ChainId,
 ) -> ExecutionResult {
-    let tx_hash = blake3_hash(&borsh::to_vec(&tx.payload).unwrap());
+    let tx_hash = blake3_hash(&match borsh::to_vec(&tx.payload) {
+        Ok(b) => b,
+        Err(_) => return fail_receipt(H256::ZERO, 0),
+    });
+
+    // 0. Validate chain_id — reject cross-chain replay attempts
+    if tx.payload.chain_id != chain_id {
+        debug!(
+            ?tx_hash,
+            expected = %chain_id,
+            got = %tx.payload.chain_id,
+            "chain_id mismatch"
+        );
+        return fail_receipt(tx_hash, 0);
+    }
 
     // 1. Verify signature
     if let Err(_e) = verify(&tx.payload_bytes(), &tx.signature, &tx.public_key) {
@@ -233,7 +253,7 @@ fn execute_action(
         }
 
         TransactionAction::Unstake { validator, amount } => {
-            execute_unstake(state, sender, validator, *amount)?;
+            execute_unstake(state, sender, validator, *amount, block_timestamp)?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"Unstake")],
@@ -242,13 +262,7 @@ fn execute_action(
         }
 
         TransactionAction::GovernanceVote { proposal_id, vote } => {
-            // Governance votes are recorded as logs. Full governance logic
-            // will be implemented in a later phase.
-            Ok(vec![Log {
-                address: *sender,
-                topics: vec![blake3_hash(b"GovernanceVote"), *proposal_id],
-                data: borsh::to_vec(vote).unwrap(),
-            }])
+            execute_governance_vote(state, sender, proposal_id, *vote, block_number)
         }
 
         TransactionAction::DeployContract { code, init_data: _ } => {
@@ -327,8 +341,10 @@ fn execute_action(
         }
 
         TransactionAction::CreatePool { token_a, token_b, amount_a, amount_b } => {
+            let epoch_length = state.get_epoch_length();
+            let current_epoch = if epoch_length > 0 { block_number / epoch_length } else { 0 };
             let pool = vtt_dex::liquidity::create_pool(
-                state, sender, *token_a, *token_b, *amount_a, *amount_b, 0, // TODO: pass current epoch
+                state, sender, *token_a, *token_b, *amount_a, *amount_b, current_epoch,
             ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
@@ -371,8 +387,7 @@ fn execute_action(
         }
 
         TransactionAction::ClaimRevenue { pool_id } => {
-            // Treasury address hardcoded for now — should come from chain config
-            let treasury = Address::ZERO; // TODO: configure via genesis
+            let treasury = state.get_treasury_address();
             let (fees_a, fees_b) = vtt_dex::revenue::claim_protocol_fees(
                 state, sender, pool_id, &treasury,
             ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
@@ -384,12 +399,29 @@ fn execute_action(
         }
 
         TransactionAction::ClaimMiningRewards { pool_id } => {
-            // Mining state would need to be loaded from storage
-            // For now, emit log — full mining integration in a follow-up
+            let epoch_length = state.get_epoch_length();
+            let current_epoch = if epoch_length > 0 { block_number / epoch_length } else { 0 };
+
+            // Load mining state from storage
+            let mining_data = state.get_mining_state_raw(pool_id)
+                .ok_or_else(|| ExecutionError::Custom("mining not active for this pool".to_string()))?
+                .to_vec();
+            let mut mining_state = vtt_dex::MiningState::try_from_slice(&mining_data)
+                .map_err(|_| ExecutionError::Custom("corrupt mining state".to_string()))?;
+
+            let reward_amount = vtt_dex::mining::claim_mining_rewards(
+                state, sender, pool_id, current_epoch, &mut mining_state,
+            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+
+            // Save updated mining state
+            let updated_data = borsh::to_vec(&mining_state)
+                .map_err(|_| ExecutionError::Custom("failed to serialize mining state".to_string()))?;
+            state.put_mining_state_raw(*pool_id, updated_data);
+
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"ClaimMiningRewards"), *pool_id],
-                data: vec![],
+                data: borsh::to_vec(&reward_amount.raw()).unwrap(),
             }])
         }
 
@@ -428,6 +460,13 @@ fn execute_action(
             destination_address,
         } => {
             execute_bridge_withdraw(state, sender, token, *amount, *destination_chain, destination_address)
+        }
+
+        TransactionAction::GovernancePropose {
+            description,
+            action_type,
+        } => {
+            execute_governance_propose(state, sender, description, action_type, block_number, nonce)
         }
     }
 }
@@ -490,12 +529,18 @@ fn execute_stake(
     Ok(())
 }
 
+/// Default unbonding period: 21 days in milliseconds.
+const DEFAULT_UNBONDING_PERIOD_MS: u64 = 21 * 24 * 3600 * 1000;
+
 /// Execute an unstaking operation.
+/// Tokens are not returned immediately; instead an unbonding entry is created
+/// that matures after the unbonding period.
 fn execute_unstake(
     state: &mut StateDB,
     sender: &Address,
     validator: &Address,
     amount: Amount,
+    block_timestamp: u64,
 ) -> Result<(), ExecutionError> {
     let mut val_account = state.get_account(validator);
     let mut staking = val_account.staking.clone().unwrap_or_default();
@@ -536,8 +581,17 @@ fn execute_unstake(
     val_account.staking = Some(staking);
     state.put_account(*validator, val_account);
 
-    // Return VTT to sender (in production this goes through unbonding period)
-    state.add_balance(sender, amount)?;
+    // Create an unbonding entry instead of returning VTT immediately.
+    // The funds will be released when process_unbonding() is called at a
+    // block whose timestamp >= completion_time.
+    let completion_time = block_timestamp + DEFAULT_UNBONDING_PERIOD_MS;
+    state.add_unbonding_entry(
+        *sender,
+        vtt_state::account::UnbondingEntry {
+            amount,
+            completion_time,
+        },
+    );
 
     Ok(())
 }
@@ -632,7 +686,8 @@ fn execute_call_contract(
 
     // Pre-populate the execution context with existing storage
     {
-        let mut storage = ctx.storage.lock().unwrap();
+        let mut storage = ctx.storage.lock()
+            .map_err(|_| ExecutionError::Custom("contract storage lock poisoned".into()))?;
         for (key, val) in existing_storage {
             storage.insert(key, val);
         }
@@ -655,7 +710,8 @@ fn execute_call_contract(
 
     // Persist storage changes back to StateDB
     {
-        let storage = ctx.storage.lock().unwrap();
+        let storage = ctx.storage.lock()
+            .map_err(|_| ExecutionError::Custom("contract storage lock poisoned".into()))?;
         for (key, val) in storage.iter() {
             state.put_contract_storage(*contract, key.clone(), val.clone());
         }
@@ -1013,7 +1069,10 @@ fn execute_finalize_asset_proposal(
         proposal_mut.status = AssetProposalStatus::Rejected;
     }
 
-    let final_status = state.get_asset_proposal(proposal_id).unwrap().status.clone();
+    let final_status = match state.get_asset_proposal(proposal_id) {
+        Some(p) => p.status.clone(),
+        None => return Err(ExecutionError::Custom("asset proposal disappeared during finalization".into())),
+    };
     let status_str = match &final_status {
         AssetProposalStatus::Executed => "Executed",
         AssetProposalStatus::Rejected => "Rejected",
@@ -1058,6 +1117,148 @@ fn execute_bridge_withdraw(
         address: *sender,
         topics: vec![blake3_hash(b"BridgeWithdraw"), *token],
         data: borsh::to_vec(&(*sender, *token, amount, destination_chain, *destination_address)).unwrap(),
+    }])
+}
+
+/// Execute governance proposal creation.
+/// The sender must have staked VTT (either as a validator or delegator).
+/// The proposal is persisted in the state DB via GovernanceSystem.
+fn execute_governance_propose(
+    state: &mut StateDB,
+    sender: &Address,
+    description: &str,
+    action_type: &str,
+    block_number: u64,
+    _nonce: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    if description.is_empty() {
+        return Err(ExecutionError::Custom(
+            "proposal description must not be empty".into(),
+        ));
+    }
+
+    // Validate action_type and map to ProposalAction
+    let action = match action_type {
+        "parameter_change" => ProposalAction::ParameterChange {
+            key: String::new(),
+            value: description.to_string(),
+        },
+        "treasury_spend" => ProposalAction::TreasurySpend {
+            recipient: Address::ZERO,
+            amount: Amount::ZERO,
+        },
+        "signal" => ProposalAction::ProtocolUpgrade {
+            version: 0,
+            description: description.to_string(),
+        },
+        other => {
+            return Err(ExecutionError::Custom(format!(
+                "invalid action_type '{}', must be one of: parameter_change, treasury_spend, signal",
+                other
+            )));
+        }
+    };
+
+    // Check the sender has stake (validator self-stake or delegation)
+    let sender_account = state.get_account(sender);
+    let has_stake = match &sender_account.staking {
+        Some(staking) => !staking.total_stake.is_zero(),
+        None => false,
+    };
+
+    if !has_stake {
+        return Err(ExecutionError::Custom(
+            "sender must have staked VTT to create proposals".into(),
+        ));
+    }
+
+    // Create proposal via GovernanceSystem
+    let mut gov = GovernanceSystem::new();
+
+    // Load existing proposals from state (reconstitute system from stored proposals)
+    // For proposal creation we only need the system to generate a unique ID
+    let proposal_id = gov.create_proposal(
+        *sender,
+        action,
+        description.to_string(),
+        block_number,
+    );
+
+    // Serialize and store the proposal in state
+    let proposal = gov.get(&proposal_id)
+        .ok_or_else(|| ExecutionError::Custom("governance proposal creation failed".into()))?
+        .clone();
+    let proposal_bytes = borsh::to_vec(&proposal)
+        .map_err(|e| ExecutionError::Custom(format!("proposal serialization failed: {e}")))?;
+    state.put_governance_proposal(proposal_id, proposal_bytes);
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"GovernancePropose"), proposal_id],
+        data: borsh::to_vec(&(*sender, description, action_type)).unwrap(),
+    }])
+}
+
+/// Execute a governance vote on a protocol proposal.
+/// Loads the proposal from state, records the vote, and saves back.
+fn execute_governance_vote(
+    state: &mut StateDB,
+    sender: &Address,
+    proposal_id: &H256,
+    vote: Vote,
+    block_number: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    // Load proposal from state
+    let proposal_bytes = state
+        .get_governance_proposal_owned(proposal_id)
+        .ok_or_else(|| ExecutionError::Custom("governance proposal not found".into()))?;
+
+    let mut proposal: Proposal = borsh::from_slice(&proposal_bytes)
+        .map_err(|e| ExecutionError::Custom(format!("corrupt governance proposal: {e}")))?;
+
+    // Verify it's Active
+    if proposal.status != vtt_consensus::governance::ProposalStatus::Active {
+        return Err(ExecutionError::Custom("proposal is not active".into()));
+    }
+
+    // Verify voting hasn't ended
+    if proposal.is_voting_ended(block_number) {
+        return Err(ExecutionError::Custom("voting period has ended".into()));
+    }
+
+    // Verify sender hasn't already voted
+    if proposal.has_voted(sender) {
+        return Err(ExecutionError::Custom("already voted on this proposal".into()));
+    }
+
+    // Get sender's voting power (staked VTT)
+    let sender_account = state.get_account(sender);
+    let voting_power = match &sender_account.staking {
+        Some(staking) if !staking.total_stake.is_zero() => staking.total_stake,
+        _ => {
+            return Err(ExecutionError::Custom(
+                "no staked VTT to vote with".into(),
+            ));
+        }
+    };
+
+    // Apply vote
+    match vote {
+        Vote::Yes => proposal.votes_yes = proposal.votes_yes + voting_power,
+        Vote::No => proposal.votes_no = proposal.votes_no + voting_power,
+        Vote::Abstain => proposal.votes_abstain = proposal.votes_abstain + voting_power,
+    }
+    proposal.voters.push(*sender);
+
+    // Save updated proposal
+    let updated_bytes = borsh::to_vec(&proposal)
+        .map_err(|e| ExecutionError::Custom(format!("proposal serialization failed: {e}")))?;
+    state.put_governance_proposal(*proposal_id, updated_bytes);
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"GovernanceVote"), *proposal_id],
+        data: borsh::to_vec(&vote).unwrap(),
     }])
 }
 
@@ -1111,7 +1312,120 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::VoteAssetProposal { .. } => 30_000,
         TransactionAction::FinalizeAssetProposal { .. } => 100_000,
         TransactionAction::BridgeWithdraw { .. } => 50_000,
+        TransactionAction::GovernancePropose { .. } => 100_000,
     }
+}
+
+/// Auto-finalize governance proposals whose voting period has ended.
+///
+/// For each protocol governance proposal stored in state:
+///   - Skip if not Active or voting period not ended
+///   - Check quorum (33% of total staked VTT must have voted)
+///   - Check threshold (>50% yes votes of yes+no)
+///   - If passed: execute the proposal action, then mark as Executed
+///   - If failed: mark as Rejected
+///
+/// Returns the number of proposals finalized.
+pub fn finalize_governance_proposals(
+    state: &mut StateDB,
+    current_block: u64,
+    total_staked: Amount,
+) -> u64 {
+    use vtt_consensus::governance::{ProposalStatus, ProposalAction};
+
+    // Collect all proposal IDs and their raw bytes first (to avoid borrow issues)
+    let proposals_raw: Vec<(H256, Vec<u8>)> = state
+        .iter_governance_proposals()
+        .map(|(id, data)| (*id, data.clone()))
+        .collect();
+
+    let mut finalized_count = 0u64;
+
+    for (proposal_id, proposal_bytes) in proposals_raw {
+        let proposal: Proposal = match borsh::from_slice(&proposal_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(?proposal_id, error = %e, "skipping corrupt governance proposal");
+                continue;
+            }
+        };
+
+        // Only process Active proposals whose voting period has ended
+        if proposal.status != ProposalStatus::Active {
+            continue;
+        }
+        if !proposal.is_voting_ended(current_block) {
+            continue;
+        }
+
+        // Check quorum and threshold
+        let has_quorum = proposal.has_quorum(total_staked);
+        let passes_threshold = proposal.passes_threshold();
+        let passed = has_quorum && passes_threshold;
+
+        if passed {
+            // Execute the proposal action
+            match &proposal.action {
+                ProposalAction::ParameterChange { key, value } => {
+                    // Log the parameter change; full parameter updates require consensus restart
+                    debug!(key, value, ?proposal_id, "governance parameter change passed (logged, requires restart)");
+                }
+                ProposalAction::TreasurySpend { recipient, amount } => {
+                    let treasury_addr = state.get_treasury_address();
+                    let treasury_balance = state.get_balance(&treasury_addr);
+                    if treasury_balance >= *amount {
+                        if let Err(e) = state.transfer(&treasury_addr, recipient, *amount) {
+                            debug!(?proposal_id, error = %e, "treasury spend transfer failed");
+                        } else {
+                            debug!(?proposal_id, %recipient, %amount, "treasury spend executed");
+                        }
+                    } else {
+                        debug!(
+                            ?proposal_id,
+                            ?treasury_balance,
+                            ?amount,
+                            "treasury spend failed: insufficient treasury balance"
+                        );
+                    }
+                }
+                ProposalAction::RegisterChain { name, .. } => {
+                    debug!(?proposal_id, name, "chain registration signal passed");
+                }
+                ProposalAction::ProtocolUpgrade { version, description } => {
+                    debug!(?proposal_id, version, description, "protocol upgrade signal passed");
+                }
+            }
+
+            // Mark as Executed
+            let mut updated = proposal.clone();
+            updated.status = ProposalStatus::Executed;
+            let updated_bytes = match borsh::to_vec(&updated) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            state.put_governance_proposal(proposal_id, updated_bytes);
+        } else {
+            // Mark as Rejected
+            let mut updated = proposal.clone();
+            updated.status = ProposalStatus::Rejected;
+            let updated_bytes = match borsh::to_vec(&updated) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            state.put_governance_proposal(proposal_id, updated_bytes);
+        }
+
+        finalized_count += 1;
+        debug!(
+            ?proposal_id,
+            passed,
+            has_quorum,
+            passes_threshold,
+            "governance proposal finalized"
+        );
+    }
+
+    finalized_count
 }
 
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {

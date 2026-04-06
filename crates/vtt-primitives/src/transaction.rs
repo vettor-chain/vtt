@@ -138,6 +138,14 @@ pub enum TransactionAction {
         /// Destination address on the external chain (20 bytes for EVM)
         destination_address: Address,
     },
+
+    /// Create a governance proposal (requires staked VTT).
+    GovernancePropose {
+        /// Human-readable description of the proposal.
+        description: String,
+        /// Type of proposal: "parameter_change", "treasury_spend", "signal".
+        action_type: String,
+    },
 }
 
 /// Payload for cross-chain transfers.
@@ -318,6 +326,10 @@ mod tests {
                 amount: Amount::from_vtt(100),
                 destination_chain: 1,
                 destination_address: Address::from([0xAA; 20]),
+            },
+            TransactionAction::GovernancePropose {
+                description: "Reduce block time".to_string(),
+                action_type: "parameter_change".to_string(),
             },
         ];
 

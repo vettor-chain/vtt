@@ -2,7 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::amount::Amount;
-use crate::ChainId;
+use crate::{Address, ChainId};
 
 /// DPoS consensus parameters for a chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -24,6 +24,8 @@ pub struct ConsensusParams {
     /// Downtime threshold: missing more than this fraction of slots triggers slash.
     /// Expressed as percentage (e.g., 50 = 50%).
     pub downtime_threshold_pct: u8,
+    /// Protocol treasury address that receives block reward share and protocol fees.
+    pub treasury_address: Address,
 }
 
 impl Default for ConsensusParams {
@@ -37,6 +39,7 @@ impl Default for ConsensusParams {
             slash_double_sign_bps: 500,            // 5%
             slash_downtime_bps: 10,                // 0.1%
             downtime_threshold_pct: 50,
+            treasury_address: Address::ZERO,
         }
     }
 }

@@ -1,0 +1,7 @@
+target/
+.git/
+tests/integration/target/
+*.md
+docs/
+.idea/
+.superpowers/

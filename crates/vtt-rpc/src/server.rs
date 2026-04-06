@@ -1,24 +1,27 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use jsonrpsee::core::async_trait;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
-use tracing::info;
+use tracing::{debug, info};
 
 use borsh::BorshDeserialize;
 use vtt_chain::Chain;
 use vtt_crypto::blake3_hash;
 use vtt_primitives::amount::Amount;
 use vtt_primitives::{Address, BlockNumber, H256};
+use vtt_telemetry::NodeMetrics;
 use vtt_txpool::TxPool;
 
 use crate::types::{
     AccountInfo, AssetBalanceInfo, AssetInfo, AssetProposalInfo, BlockInfo, BridgeWithdrawalInfo,
-    ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, OracleFeedInfo,
-    PaginatedResult, PoolInfo, StakingInfo, SwapQuoteRpc, TransactionInfo, ValidatorInfoRpc,
+    ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, NodeMetricsInfo, OracleFeedInfo,
+    PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, StakingInfo, SwapQuoteRpc,
+    TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -106,6 +109,17 @@ pub trait VttApi {
     #[method(name = "vtt_getPool")]
     async fn get_pool(&self, pool_id: H256) -> Result<Option<PoolInfo>, ErrorObjectOwned>;
 
+    /// Get spot price of a token in VTT, derived from DEX pool reserves.
+    #[method(name = "vtt_getTokenPrice")]
+    async fn get_token_price(
+        &self,
+        token_id: H256,
+    ) -> Result<Option<TokenPriceRpc>, ErrorObjectOwned>;
+
+    /// Get spot prices for all DEX pools.
+    #[method(name = "vtt_getPoolPrices")]
+    async fn get_pool_prices(&self) -> Result<Vec<PoolPriceRpc>, ErrorObjectOwned>;
+
     /// Get a swap quote (read-only, no state mutation).
     #[method(name = "vtt_getSwapQuote")]
     async fn get_swap_quote(
@@ -158,6 +172,114 @@ pub trait VttApi {
     async fn get_bridge_withdrawals(
         &self,
     ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned>;
+
+    /// Get node metrics for monitoring.
+    #[method(name = "vtt_getNodeMetrics")]
+    async fn get_node_metrics(&self) -> Result<NodeMetricsInfo, ErrorObjectOwned>;
+
+    /// List all protocol governance proposals.
+    #[method(name = "vtt_listProposals")]
+    async fn list_proposals(&self) -> Result<Vec<ProposalInfo>, ErrorObjectOwned>;
+
+    /// Get a single protocol governance proposal by ID.
+    #[method(name = "vtt_getProposal")]
+    async fn get_proposal(&self, id: H256) -> Result<Option<ProposalInfo>, ErrorObjectOwned>;
+
+    /// Get a range of blocks starting from a given number.
+    #[method(name = "vtt_getBlockRange")]
+    async fn get_block_range(&self, from: u64, count: u64) -> Result<Vec<BlockInfo>, ErrorObjectOwned>;
+
+    /// Get balances for multiple assets at once.
+    #[method(name = "vtt_getAssetBalances")]
+    async fn get_asset_balances(&self, address: Address, asset_ids: Vec<H256>) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
+}
+
+/// Global rate limiter for sendTransaction -- sliding window counter.
+///
+/// NOTE: This limiter is global (shared across all callers), not per-IP.
+/// For production deployments with public-facing RPC, consider implementing
+/// per-IP rate limiting (e.g. via a HashMap<IpAddr, RateLimiter> or an
+/// external reverse-proxy such as nginx/HAProxy).
+pub struct RateLimiter {
+    /// Maximum calls per window.
+    max_calls: u64,
+    /// Counter for current window.
+    count: AtomicU64,
+    /// Start of current window.
+    window_start: RwLock<Instant>,
+}
+
+impl RateLimiter {
+    pub fn new(max_calls_per_second: u64) -> Self {
+        Self {
+            max_calls: max_calls_per_second,
+            count: AtomicU64::new(0),
+            window_start: RwLock::new(Instant::now()),
+        }
+    }
+
+    /// Returns true if the request is allowed, false if rate-limited.
+    pub fn check(&self) -> bool {
+        let now = Instant::now();
+        {
+            let start = match self.window_start.read() {
+                Ok(s) => s,
+                Err(_) => return false, // poisoned lock — deny request
+            };
+            if now.duration_since(*start).as_secs() >= 1 {
+                drop(start);
+                // Reset window
+                let mut start = match self.window_start.write() {
+                    Ok(s) => s,
+                    Err(_) => return false, // poisoned lock — deny request
+                };
+                // Double-check after acquiring write lock
+                if now.duration_since(*start).as_secs() >= 1 {
+                    *start = now;
+                    self.count.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+        let prev = self.count.fetch_add(1, Ordering::Relaxed);
+        prev < self.max_calls
+    }
+}
+
+/// Helper: acquire a read lock on the chain, returning a JSON-RPC internal error on lock poisoning.
+fn read_chain(
+    chain: &Arc<RwLock<Chain>>,
+) -> Result<std::sync::RwLockReadGuard<'_, Chain>, ErrorObjectOwned> {
+    chain
+        .read()
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>))
+}
+
+/// Helper: acquire a write lock on the chain, returning a JSON-RPC internal error on lock poisoning.
+#[allow(dead_code)]
+fn write_chain(
+    chain: &Arc<RwLock<Chain>>,
+) -> Result<std::sync::RwLockWriteGuard<'_, Chain>, ErrorObjectOwned> {
+    chain
+        .write()
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>))
+}
+
+/// Helper: acquire a read lock on the tx pool, returning a JSON-RPC internal error on lock poisoning.
+fn read_txpool(
+    txpool: &Arc<RwLock<TxPool>>,
+) -> Result<std::sync::RwLockReadGuard<'_, TxPool>, ErrorObjectOwned> {
+    txpool
+        .read()
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>))
+}
+
+/// Helper: acquire a write lock on the tx pool, returning a JSON-RPC internal error on lock poisoning.
+fn write_txpool(
+    txpool: &Arc<RwLock<TxPool>>,
+) -> Result<std::sync::RwLockWriteGuard<'_, TxPool>, ErrorObjectOwned> {
+    txpool
+        .write()
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>))
 }
 
 /// Shared state accessible by RPC handlers.
@@ -168,6 +290,10 @@ pub struct RpcState {
     pub total_burned_milli: AtomicU64,
     /// Cumulative VTT minted as block rewards (whole VTT units × 1000).
     pub total_minted_milli: AtomicU64,
+    /// Optional node metrics for monitoring.
+    pub metrics: Option<Arc<NodeMetrics>>,
+    /// Rate limiter for sendTransaction.
+    pub send_tx_limiter: RateLimiter,
 }
 
 /// Implementation of the VTT JSON-RPC API.
@@ -178,12 +304,12 @@ struct VttRpcImpl {
 #[async_trait]
 impl VttApiServer for VttRpcImpl {
     async fn get_balance(&self, address: Address) -> Result<Amount, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain.get_balance_of(&address))
     }
 
     async fn get_account(&self, address: Address) -> Result<AccountInfo, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let account = chain.state().get_account(&address);
         Ok(AccountInfo {
             address,
@@ -194,7 +320,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_block(&self, hash: H256) -> Result<Option<BlockInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain
             .get_block(&hash)
             .map(|block| BlockInfo::from_header(&block.header, hash, block.tx_count())))
@@ -204,7 +330,7 @@ impl VttApiServer for VttRpcImpl {
         &self,
         number: BlockNumber,
     ) -> Result<Option<BlockInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain.get_block_by_number(number).map(|block| {
             let hash = blake3_hash(&block.header.signable_bytes());
             BlockInfo::from_header(&block.header, hash, block.tx_count())
@@ -212,12 +338,12 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn chain_height(&self) -> Result<BlockNumber, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain.height().unwrap_or(0))
     }
 
     async fn chain_status(&self) -> Result<ChainStatus, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let vs = chain.validator_set();
         Ok(ChainStatus {
             chain_id: chain
@@ -234,7 +360,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_consensus_params(&self) -> Result<ConsensusParamsRpc, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let p = chain.consensus().params();
         Ok(ConsensusParamsRpc {
             epoch_length: p.epoch_length,
@@ -249,7 +375,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_gas_config(&self) -> Result<GasConfigRpc, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let g = chain.gas_config();
         Ok(GasConfigRpc {
             min_gas_price: g.min_gas_price,
@@ -259,7 +385,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_validators(&self) -> Result<Vec<ValidatorInfoRpc>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let vs = chain.validator_set();
         Ok(vs
             .validators
@@ -269,17 +395,18 @@ impl VttApiServer for VttRpcImpl {
                 total_stake: v.total_stake,
                 self_stake: v.self_stake,
                 commission_bps: v.commission_bps,
+                is_active: true, // all validators in the set are active by definition
             })
             .collect())
     }
 
     async fn tx_pool_size(&self) -> Result<usize, ErrorObjectOwned> {
-        let pool = self.state.txpool.read().unwrap();
+        let pool = read_txpool(&self.state.txpool)?;
         Ok(pool.len())
     }
 
     async fn get_asset(&self, asset_id: H256) -> Result<Option<AssetInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain.state().get_asset(&asset_id).map(|a| AssetInfo {
             id: a.id,
             name: a.name.clone(),
@@ -296,7 +423,7 @@ impl VttApiServer for VttRpcImpl {
         asset_id: H256,
         address: Address,
     ) -> Result<AssetBalanceInfo, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let record = chain.state().get_ownership(&asset_id, &address);
         Ok(AssetBalanceInfo {
             asset_id,
@@ -307,7 +434,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn list_assets(&self) -> Result<Vec<AssetInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain
             .state()
             .iter_assets()
@@ -324,7 +451,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_oracle(&self, feed_id: H256) -> Result<Option<OracleFeedInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain.state().get_oracle(&feed_id).map(|f| OracleFeedInfo {
             feed_id: f.feed_id,
             name: f.name.clone(),
@@ -336,26 +463,39 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned> {
+        // Rate limit check
+        if !self.state.send_tx_limiter.check() {
+            return Err(ErrorObjectOwned::owned(
+                -32005,
+                "Rate limit exceeded",
+                None::<()>,
+            ));
+        }
+
         // Decode the hex-encoded signed transaction
         let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("invalid hex: {e}"), None::<()>)
         })?;
         let tx: vtt_primitives::transaction::SignedTransaction = borsh::from_slice(&tx_bytes)
             .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("invalid transaction: {e}"), None::<()>)
+                debug!("transaction deserialization failed: {e}");
+                ErrorObjectOwned::owned(-32602, "Invalid transaction", None::<()>)
             })?;
 
         let tx_hash = blake3_hash(&tx.payload_bytes());
 
         // Add to transaction pool
         let sender = vtt_crypto::address_from_public_key(&tx.public_key);
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let account_nonce = chain.state().get_nonce(&sender);
         drop(chain);
 
-        let mut pool = self.state.txpool.write().unwrap();
+        let mut pool = write_txpool(&self.state.txpool)?;
         pool.add(tx, sender, account_nonce)
-            .map_err(|e| ErrorObjectOwned::owned(-32603, format!("pool error: {e}"), None::<()>))?;
+            .map_err(|e| {
+                debug!("pool add failed for {sender}: {e}");
+                ErrorObjectOwned::owned(-32603, "Pool operation failed", None::<()>)
+            })?;
 
         Ok(tx_hash)
     }
@@ -364,7 +504,7 @@ impl VttApiServer for VttRpcImpl {
         &self,
         address: Address,
     ) -> Result<Option<StakingInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let account = chain.state().get_account(&address);
         Ok(account.staking.map(|s| StakingInfo {
             address,
@@ -384,7 +524,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn list_pools(&self) -> Result<Vec<PoolInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let mut pools = Vec::new();
         for (_id, data) in chain.state().iter_pools() {
             let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
@@ -396,7 +536,7 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn get_pool(&self, pool_id: H256) -> Result<Option<PoolInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         match chain.state().get_pool_raw(&pool_id) {
             None => Ok(None),
             Some(data) => {
@@ -412,6 +552,86 @@ impl VttApiServer for VttRpcImpl {
         }
     }
 
+    async fn get_token_price(
+        &self,
+        token_id: H256,
+    ) -> Result<Option<TokenPriceRpc>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        // Iterate all pools, find one where this token is paired with native VTT (H256::ZERO)
+        for (_id, data) in chain.state().iter_pools() {
+            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
+            })?;
+
+            let ra = pool.reserve_a.raw();
+            let rb = pool.reserve_b.raw();
+
+            if pool.token_a == token_id && vtt_dex::PoolState::is_native(&pool.token_b) && ra > 0 {
+                // price = reserve_b / reserve_a, scaled to 18 decimals
+                let price = (rb as u128)
+                    .checked_mul(10u128.pow(18))
+                    .unwrap_or(u128::MAX)
+                    / ra;
+                return Ok(Some(TokenPriceRpc {
+                    token_id,
+                    price_in_vtt: price.to_string(),
+                    pool_id: pool.pool_id,
+                }));
+            }
+            if pool.token_b == token_id && vtt_dex::PoolState::is_native(&pool.token_a) && rb > 0 {
+                // price = reserve_a / reserve_b, scaled to 18 decimals
+                let price = (ra as u128)
+                    .checked_mul(10u128.pow(18))
+                    .unwrap_or(u128::MAX)
+                    / rb;
+                return Ok(Some(TokenPriceRpc {
+                    token_id,
+                    price_in_vtt: price.to_string(),
+                    pool_id: pool.pool_id,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn get_pool_prices(&self) -> Result<Vec<PoolPriceRpc>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        let mut prices = Vec::new();
+        for (_id, data) in chain.state().iter_pools() {
+            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
+                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
+            })?;
+
+            let ra = pool.reserve_a.raw();
+            let rb = pool.reserve_b.raw();
+
+            // price_a_in_b = reserve_b / reserve_a, scaled to 18 decimals
+            let price_a_in_b = if ra > 0 {
+                rb.checked_mul(10u128.pow(18)).unwrap_or(u128::MAX) / ra
+            } else {
+                0
+            };
+
+            // price_b_in_a = reserve_a / reserve_b, scaled to 18 decimals
+            let price_b_in_a = if rb > 0 {
+                ra.checked_mul(10u128.pow(18)).unwrap_or(u128::MAX) / rb
+            } else {
+                0
+            };
+
+            prices.push(PoolPriceRpc {
+                pool_id: pool.pool_id,
+                token_a: pool.token_a,
+                token_b: pool.token_b,
+                price_a_in_b: price_a_in_b.to_string(),
+                price_b_in_a: price_b_in_a.to_string(),
+                tvl_a: ra.to_string(),
+                tvl_b: rb.to_string(),
+            });
+        }
+        Ok(prices)
+    }
+
     async fn get_swap_quote(
         &self,
         pool_id: H256,
@@ -422,7 +642,7 @@ impl VttApiServer for VttRpcImpl {
             ErrorObjectOwned::owned(-32602, "invalid amount_in: expected decimal u128", None::<()>)
         })?;
 
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let data = chain.state().get_pool_raw(&pool_id).ok_or_else(|| {
             ErrorObjectOwned::owned(-32602, "pool not found", None::<()>)
         })?;
@@ -470,7 +690,8 @@ impl VttApiServer for VttRpcImpl {
         page: usize,
         limit: usize,
     ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let limit = limit.min(100); // cap to prevent resource exhaustion
+        let chain = read_chain(&self.state.chain)?;
         let all = collect_all_txs(&chain);
         let total = all.len();
         let start = page * limit;
@@ -487,7 +708,7 @@ impl VttApiServer for VttRpcImpl {
         &self,
         hash: H256,
     ) -> Result<Option<TransactionInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let height = chain.height().unwrap_or(0);
         for n in (0..=height).rev() {
             if let Some(block) = chain.get_block_by_number(n) {
@@ -508,7 +729,8 @@ impl VttApiServer for VttRpcImpl {
         page: usize,
         limit: usize,
     ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let limit = limit.min(100); // cap to prevent resource exhaustion
+        let chain = read_chain(&self.state.chain)?;
         let all: Vec<TransactionInfo> = collect_all_txs(&chain)
             .into_iter()
             .filter(|tx| tx.from == address || tx.to == Some(address))
@@ -528,7 +750,7 @@ impl VttApiServer for VttRpcImpl {
         &self,
         asset_id: H256,
     ) -> Result<Vec<AssetProposalInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let proposals = chain.state().iter_asset_proposals_for_asset(&asset_id);
         Ok(proposals.into_iter().map(proposal_to_info).collect())
     }
@@ -537,7 +759,7 @@ impl VttApiServer for VttRpcImpl {
         &self,
         proposal_id: H256,
     ) -> Result<Option<AssetProposalInfo>, ErrorObjectOwned> {
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         Ok(chain
             .state()
             .get_asset_proposal(&proposal_id)
@@ -549,7 +771,7 @@ impl VttApiServer for VttRpcImpl {
     ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned> {
         use vtt_primitives::transaction::TransactionAction;
 
-        let chain = self.state.chain.read().unwrap();
+        let chain = read_chain(&self.state.chain)?;
         let height = chain.height().unwrap_or(0);
         let mut withdrawals = Vec::new();
 
@@ -583,6 +805,127 @@ impl VttApiServer for VttRpcImpl {
         }
 
         Ok(withdrawals)
+    }
+
+    async fn get_node_metrics(&self) -> Result<NodeMetricsInfo, ErrorObjectOwned> {
+        match &self.state.metrics {
+            Some(m) => Ok(NodeMetricsInfo {
+                block_height: m.block_height.get(),
+                connected_peers: m.connected_peers.get(),
+                txpool_size: m.txpool_size.get(),
+                blocks_imported: m.blocks_imported.get(),
+                transactions_executed: m.transactions_executed.get(),
+                current_epoch: m.current_epoch.get(),
+                active_validators: m.active_validators.get(),
+            }),
+            None => {
+                // Fallback: derive basic metrics from chain state
+                let chain = read_chain(&self.state.chain)?;
+                let pool = read_txpool(&self.state.txpool)?;
+                Ok(NodeMetricsInfo {
+                    block_height: chain.height().unwrap_or(0) as i64,
+                    connected_peers: 0,
+                    txpool_size: pool.len() as i64,
+                    blocks_imported: 0,
+                    transactions_executed: 0,
+                    current_epoch: 0,
+                    active_validators: chain.validator_set().validators.len() as i64,
+                })
+            }
+        }
+    }
+
+    async fn list_proposals(&self) -> Result<Vec<ProposalInfo>, ErrorObjectOwned> {
+        use vtt_consensus::governance::Proposal;
+
+        let chain = read_chain(&self.state.chain)?;
+        let mut proposals = Vec::new();
+        for (_id, data) in chain.state().iter_governance_proposals() {
+            if let Ok(p) = borsh::from_slice::<Proposal>(data) {
+                proposals.push(gov_proposal_to_info(&p));
+            }
+        }
+        Ok(proposals)
+    }
+
+    async fn get_proposal(&self, id: H256) -> Result<Option<ProposalInfo>, ErrorObjectOwned> {
+        use vtt_consensus::governance::Proposal;
+
+        let chain = read_chain(&self.state.chain)?;
+        match chain.state().get_governance_proposal(&id) {
+            None => Ok(None),
+            Some(data) => {
+                let p = borsh::from_slice::<Proposal>(data).map_err(|e| {
+                    ErrorObjectOwned::owned(-32603, format!("proposal deserialize: {e}"), None::<()>)
+                })?;
+                Ok(Some(gov_proposal_to_info(&p)))
+            }
+        }
+    }
+
+    async fn get_block_range(&self, from: u64, count: u64) -> Result<Vec<BlockInfo>, ErrorObjectOwned> {
+        let count = count.min(100);
+        let chain = read_chain(&self.state.chain)?;
+        let mut blocks = Vec::with_capacity(count as usize);
+        for n in from..from.saturating_add(count) {
+            if let Some(block) = chain.get_block_by_number(n) {
+                let hash = blake3_hash(&block.header.signable_bytes());
+                blocks.push(BlockInfo::from_header(&block.header, hash, block.tx_count()));
+            }
+        }
+        Ok(blocks)
+    }
+
+    async fn get_asset_balances(&self, address: Address, asset_ids: Vec<H256>) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned> {
+        if asset_ids.len() > 100 {
+            return Err(ErrorObjectOwned::owned(-32602, "too many asset_ids (max 100)", None::<()>));
+        }
+        let chain = read_chain(&self.state.chain)?;
+        let mut balances = Vec::with_capacity(asset_ids.len());
+        for asset_id in &asset_ids {
+            let record = chain.state().get_ownership(asset_id, &address);
+            balances.push(AssetBalanceInfo {
+                asset_id: *asset_id,
+                owner: address,
+                available: record.available,
+                locked: record.locked,
+            });
+        }
+        Ok(balances)
+    }
+}
+
+/// Convert a protocol governance `Proposal` to RPC-friendly `ProposalInfo`.
+fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo {
+    use vtt_consensus::governance::{ProposalAction, ProposalStatus};
+
+    let action_type = match &p.action {
+        ProposalAction::ParameterChange { .. } => "ParameterChange",
+        ProposalAction::RegisterChain { .. } => "RegisterChain",
+        ProposalAction::TreasurySpend { .. } => "TreasurySpend",
+        ProposalAction::ProtocolUpgrade { .. } => "ProtocolUpgrade",
+    }
+    .to_string();
+
+    let status = match &p.status {
+        ProposalStatus::Active => "active",
+        ProposalStatus::Passed => "passed",
+        ProposalStatus::Rejected => "rejected",
+        ProposalStatus::Executed => "executed",
+    }
+    .to_string();
+
+    ProposalInfo {
+        id: p.id,
+        proposer: p.proposer,
+        description: p.description.clone(),
+        action_type,
+        status,
+        votes_yes: p.votes_yes,
+        votes_no: p.votes_no,
+        votes_abstain: p.votes_abstain,
+        created_at: p.created_at,
+        voting_end: p.voting_end,
     }
 }
 
@@ -665,6 +1008,9 @@ fn tx_to_info(
         TransactionAction::BridgeWithdraw { destination_address, amount, .. } => {
             ("BridgeWithdraw".to_string(), Some(*destination_address), *amount, None, None, None)
         }
+        TransactionAction::GovernancePropose { .. } => {
+            ("GovernancePropose".to_string(), None, Amount::ZERO, None, None, None)
+        }
     };
 
     TransactionInfo {
@@ -685,6 +1031,10 @@ fn tx_to_info(
 }
 
 /// Collect all transactions from canonical blocks (most recent first).
+///
+/// TODO: This iterates the entire chain on every call, which is O(blocks * txs).
+/// Replace with a persistent transaction index (e.g. address -> Vec<TxHash>)
+/// backed by the storage layer to support efficient pagination without full scans.
 fn collect_all_txs(chain: &Chain) -> Vec<TransactionInfo> {
     let height = chain.height().unwrap_or(0);
     let mut txs = Vec::new();
@@ -765,6 +1115,26 @@ impl RpcServer {
                 txpool,
                 total_burned_milli: AtomicU64::new(0),
                 total_minted_milli: AtomicU64::new(0),
+                metrics: None,
+                send_tx_limiter: RateLimiter::new(10),
+            }),
+        }
+    }
+
+    /// Create a new RPC server with shared state and node metrics.
+    pub fn with_metrics(
+        chain: Arc<RwLock<Chain>>,
+        txpool: Arc<RwLock<TxPool>>,
+        metrics: Arc<NodeMetrics>,
+    ) -> Self {
+        Self {
+            state: Arc::new(RpcState {
+                chain,
+                txpool,
+                total_burned_milli: AtomicU64::new(0),
+                total_minted_milli: AtomicU64::new(0),
+                metrics: Some(metrics),
+                send_tx_limiter: RateLimiter::new(10),
             }),
         }
     }

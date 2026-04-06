@@ -12,6 +12,7 @@ vtt-crypto = { workspace = true }
 vtt-chain = { workspace = true }
 vtt-dex = { path = "../vtt-dex" }
 vtt-txpool = { workspace = true }
+vtt-telemetry = { path = "../vtt-telemetry" }
 jsonrpsee = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -20,8 +21,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 borsh = { workspace = true }
 hex = "0.4"
+vtt-consensus = { workspace = true }
 
 [dev-dependencies]
-vtt-consensus = { workspace = true }
 vtt-genesis = { workspace = true }
 vtt-state = { workspace = true }

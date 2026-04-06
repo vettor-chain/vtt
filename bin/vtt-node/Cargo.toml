@@ -15,9 +15,13 @@ vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-chain = { workspace = true }
 vtt-consensus = { workspace = true }
+vtt-executor = { workspace = true }
 vtt-network = { workspace = true }
 vtt-genesis = { workspace = true }
+vtt-storage = { workspace = true }
+vtt-telemetry = { workspace = true }
 vtt-txpool = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }

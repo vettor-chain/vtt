@@ -1,10 +1,14 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use vtt_primitives::amount::Amount;
 use vtt_primitives::asset_governance::AssetProposal;
-use vtt_primitives::{Address, H256};
+use vtt_primitives::{Address, Timestamp, H256};
+use vtt_storage::{Column, KeyValueStore};
+
+use crate::account::UnbondingEntry;
 
 use crate::account::AccountState;
 use crate::asset::{AssetRecord, OwnershipRecord};
@@ -27,6 +31,9 @@ pub type Result<T> = std::result::Result<T, StateError>;
 
 /// State database providing read/write access to account state.
 /// Operates on an in-memory overlay that can be committed to produce a state root.
+/// Optionally backed by a persistent `KeyValueStore` (e.g., RocksDB).
+/// When `storage` is `Some`, reads fall through from cache to disk, and writes
+/// go to both cache and disk (write-through cache).
 pub struct StateDB {
     /// In-memory account cache / overlay.
     accounts: HashMap<Address, AccountState>,
@@ -44,6 +51,16 @@ pub struct StateDB {
     pools: HashMap<H256, Vec<u8>>,
     /// Asset governance proposals: proposal_id -> AssetProposal.
     asset_proposals: HashMap<H256, AssetProposal>,
+    /// Liquidity mining state: pool_id -> raw serialized MiningState.
+    mining_states: HashMap<H256, Vec<u8>>,
+    /// Protocol governance proposals: proposal_id -> raw serialized Proposal.
+    governance_proposals: HashMap<H256, Vec<u8>>,
+    /// Unbonding entries by staker address (waiting to be released after unbonding period).
+    unbonding_entries: HashMap<Address, Vec<UnbondingEntry>>,
+    /// Protocol treasury address (set from consensus params at genesis/init).
+    treasury_address: Address,
+    /// Epoch length in blocks (set from consensus params at genesis/init).
+    epoch_length: u64,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
@@ -52,10 +69,12 @@ pub struct StateDB {
     dirty_assets: Vec<H256>,
     /// Tracks which pools have been modified.
     dirty_pools: Vec<H256>,
+    /// Optional persistent storage backend (RocksDB).
+    storage: Option<Arc<dyn KeyValueStore>>,
 }
 
 impl StateDB {
-    /// Create a new empty state database.
+    /// Create a new empty state database (in-memory only).
     pub fn new() -> Self {
         Self {
             accounts: HashMap::new(),
@@ -66,10 +85,41 @@ impl StateDB {
             contract_storage: HashMap::new(),
             pools: HashMap::new(),
             asset_proposals: HashMap::new(),
+            mining_states: HashMap::new(),
+            governance_proposals: HashMap::new(),
+            unbonding_entries: HashMap::new(),
+            treasury_address: Address::ZERO,
+            epoch_length: 1200,
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
             dirty_pools: Vec::new(),
+            storage: None,
+        }
+    }
+
+    /// Create a state database backed by persistent storage.
+    /// Reads fall through from cache to disk; writes go to both.
+    pub fn with_storage(storage: Arc<dyn KeyValueStore>) -> Self {
+        Self {
+            accounts: HashMap::new(),
+            assets: HashMap::new(),
+            ownership: HashMap::new(),
+            oracles: HashMap::new(),
+            contract_code: HashMap::new(),
+            contract_storage: HashMap::new(),
+            pools: HashMap::new(),
+            asset_proposals: HashMap::new(),
+            mining_states: HashMap::new(),
+            governance_proposals: HashMap::new(),
+            unbonding_entries: HashMap::new(),
+            treasury_address: Address::ZERO,
+            epoch_length: 1200,
+            trie: StateTrie::new(),
+            dirty: Vec::new(),
+            dirty_assets: Vec::new(),
+            dirty_pools: Vec::new(),
+            storage: Some(storage),
         }
     }
 
@@ -83,8 +133,20 @@ impl StateDB {
     }
 
     /// Get account state. Returns default (empty) state if account doesn't exist.
+    /// Checks in-memory cache first, then falls back to persistent storage.
     pub fn get_account(&self, address: &Address) -> AccountState {
-        self.accounts.get(address).cloned().unwrap_or_default()
+        if let Some(account) = self.accounts.get(address) {
+            return account.clone();
+        }
+        // Fall back to persistent storage
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(bytes)) = storage.get(Column::Accounts, address.as_bytes()) {
+                if let Ok(account) = borsh::from_slice::<AccountState>(&bytes) {
+                    return account;
+                }
+            }
+        }
+        AccountState::default()
     }
 
     /// Get account state if it exists.
@@ -92,15 +154,28 @@ impl StateDB {
         self.accounts.get(address)
     }
 
-    /// Set account state.
+    /// Set account state. Writes to both cache and persistent storage.
     pub fn put_account(&mut self, address: Address, state: AccountState) {
         self.dirty.push(address);
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(&state) {
+                let _ = storage.put(Column::Accounts, address.as_bytes(), &bytes);
+            }
+        }
         self.accounts.insert(address, state);
     }
 
     /// Check if an account exists (has been explicitly set).
     pub fn account_exists(&self, address: &Address) -> bool {
-        self.accounts.contains_key(address)
+        if self.accounts.contains_key(address) {
+            return true;
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(exists) = storage.contains(Column::Accounts, address.as_bytes()) {
+                return exists;
+            }
+        }
+        false
     }
 
     /// Get the balance of an account.
@@ -168,7 +243,21 @@ impl StateDB {
                 asset.id
             )));
         }
+        // Also check persistent storage
+        if let Some(ref storage) = self.storage {
+            if let Ok(true) = storage.contains(Column::Assets, asset.id.as_bytes()) {
+                return Err(StateError::Serialization(format!(
+                    "asset already exists: {}",
+                    asset.id
+                )));
+            }
+        }
         self.dirty_assets.push(asset.id);
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(&asset) {
+                let _ = storage.put(Column::Assets, asset.id.as_bytes(), &bytes);
+            }
+        }
         self.assets.insert(asset.id, asset);
         Ok(())
     }
@@ -176,6 +265,21 @@ impl StateDB {
     /// Get an asset record by ID.
     pub fn get_asset(&self, asset_id: &H256) -> Option<&AssetRecord> {
         self.assets.get(asset_id)
+    }
+
+    /// Get an asset record by ID (owned), falling back to persistent storage.
+    pub fn get_asset_owned(&self, asset_id: &H256) -> Option<AssetRecord> {
+        if let Some(asset) = self.assets.get(asset_id) {
+            return Some(asset.clone());
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(bytes)) = storage.get(Column::Assets, asset_id.as_bytes()) {
+                if let Ok(asset) = borsh::from_slice::<AssetRecord>(&bytes) {
+                    return Some(asset);
+                }
+            }
+        }
+        None
     }
 
     /// Get a mutable asset record by ID.
@@ -200,6 +304,13 @@ impl StateDB {
     pub fn put_ownership(&mut self, record: OwnershipRecord) {
         let key = (record.asset_id, record.owner);
         self.dirty_assets.push(record.asset_id);
+        if let Some(ref storage) = self.storage {
+            let mut storage_key = record.asset_id.as_bytes().to_vec();
+            storage_key.extend_from_slice(record.owner.as_bytes());
+            if let Ok(bytes) = borsh::to_vec(&record) {
+                let _ = storage.put(Column::Ownership, &storage_key, &bytes);
+            }
+        }
         self.ownership.insert(key, record);
     }
 
@@ -281,6 +392,11 @@ impl StateDB {
 
     /// Store an asset proposal.
     pub fn put_asset_proposal(&mut self, proposal: AssetProposal) {
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(&proposal) {
+                let _ = storage.put(Column::AssetProposals, proposal.id.as_bytes(), &bytes);
+            }
+        }
         self.asset_proposals.insert(proposal.id, proposal);
     }
 
@@ -308,6 +424,11 @@ impl StateDB {
                 feed.feed_id
             )));
         }
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(&feed) {
+                let _ = storage.put(Column::Oracles, feed.feed_id.as_bytes(), &bytes);
+            }
+        }
         self.oracles.insert(feed.feed_id, feed);
         Ok(())
     }
@@ -332,33 +453,69 @@ impl StateDB {
     /// Store contract bytecode. Returns the code hash.
     pub fn store_code(&mut self, code: Vec<u8>) -> H256 {
         let hash = vtt_crypto::blake3_hash(&code);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ContractCode, hash.as_bytes(), &code);
+        }
         self.contract_code.insert(hash, code);
         hash
     }
 
     /// Get contract bytecode by code hash.
     pub fn get_code(&self, code_hash: &H256) -> Option<&Vec<u8>> {
+        // Note: returns a reference, so can only check cache.
+        // For persistent fallback, use get_code_owned.
         self.contract_code.get(code_hash)
+    }
+
+    /// Get contract bytecode by code hash (owned), falling back to storage.
+    pub fn get_code_owned(&self, code_hash: &H256) -> Option<Vec<u8>> {
+        if let Some(code) = self.contract_code.get(code_hash) {
+            return Some(code.clone());
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(bytes)) = storage.get(Column::ContractCode, code_hash.as_bytes()) {
+                return Some(bytes);
+            }
+        }
+        None
     }
 
     // --- Contract Storage Methods ---
 
     /// Read a value from a contract's storage.
     pub fn get_contract_storage(&self, address: &Address, key: &[u8]) -> Option<Vec<u8>> {
-        self.contract_storage
-            .get(&(*address, key.to_vec()))
-            .cloned()
+        if let Some(val) = self.contract_storage.get(&(*address, key.to_vec())) {
+            return Some(val.clone());
+        }
+        if let Some(ref storage) = self.storage {
+            let mut storage_key = address.as_bytes().to_vec();
+            storage_key.extend_from_slice(key);
+            if let Ok(Some(bytes)) = storage.get(Column::ContractStorage, &storage_key) {
+                return Some(bytes);
+            }
+        }
+        None
     }
 
     /// Write a value to a contract's storage.
     pub fn put_contract_storage(&mut self, address: Address, key: Vec<u8>, value: Vec<u8>) {
         self.dirty.push(address);
+        if let Some(ref storage) = self.storage {
+            let mut storage_key = address.as_bytes().to_vec();
+            storage_key.extend_from_slice(&key);
+            let _ = storage.put(Column::ContractStorage, &storage_key, &value);
+        }
         self.contract_storage.insert((address, key), value);
     }
 
     /// Delete a value from a contract's storage.
     pub fn delete_contract_storage(&mut self, address: &Address, key: &[u8]) {
         self.dirty.push(*address);
+        if let Some(ref storage) = self.storage {
+            let mut storage_key = address.as_bytes().to_vec();
+            storage_key.extend_from_slice(key);
+            let _ = storage.delete(Column::ContractStorage, &storage_key);
+        }
         self.contract_storage.remove(&(*address, key.to_vec()));
     }
 
@@ -374,20 +531,187 @@ impl StateDB {
     // --- Pool Methods ---
 
     pub fn get_pool_raw(&self, pool_id: &H256) -> Option<&[u8]> {
-        self.pools.get(pool_id).map(|v| v.as_slice())
+        if let Some(data) = self.pools.get(pool_id) {
+            return Some(data.as_slice());
+        }
+        // Note: cannot return a reference to storage data from an immutable borrow,
+        // so persistent pool reads require the caller to go through `get_pool_raw_owned`.
+        None
+    }
+
+    /// Get pool data as an owned Vec, falling back to persistent storage.
+    pub fn get_pool_raw_owned(&self, pool_id: &H256) -> Option<Vec<u8>> {
+        if let Some(data) = self.pools.get(pool_id) {
+            return Some(data.clone());
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(bytes)) = storage.get(Column::Pools, pool_id.as_bytes()) {
+                return Some(bytes);
+            }
+        }
+        None
     }
 
     pub fn put_pool_raw(&mut self, pool_id: H256, data: Vec<u8>) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::Pools, pool_id.as_bytes(), &data);
+        }
         self.pools.insert(pool_id, data);
         self.dirty_pools.push(pool_id);
     }
 
     pub fn has_pool(&self, pool_id: &H256) -> bool {
-        self.pools.contains_key(pool_id)
+        if self.pools.contains_key(pool_id) {
+            return true;
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(exists) = storage.contains(Column::Pools, pool_id.as_bytes()) {
+                return exists;
+            }
+        }
+        false
     }
 
     pub fn iter_pools(&self) -> impl Iterator<Item = (&H256, &[u8])> {
         self.pools.iter().map(|(k, v)| (k, v.as_slice()))
+    }
+
+    // --- Mining State Methods ---
+
+    /// Get raw mining state for a pool.
+    pub fn get_mining_state_raw(&self, pool_id: &H256) -> Option<&[u8]> {
+        self.mining_states.get(pool_id).map(|v| v.as_slice())
+    }
+
+    /// Store raw mining state for a pool.
+    pub fn put_mining_state_raw(&mut self, pool_id: H256, data: Vec<u8>) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::MiningStates, pool_id.as_bytes(), &data);
+        }
+        self.mining_states.insert(pool_id, data);
+    }
+
+    /// Check if mining state exists for a pool.
+    pub fn has_mining_state(&self, pool_id: &H256) -> bool {
+        if self.mining_states.contains_key(pool_id) {
+            return true;
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(exists) = storage.contains(Column::MiningStates, pool_id.as_bytes()) {
+                return exists;
+            }
+        }
+        false
+    }
+
+    // --- Chain Parameter Methods ---
+
+    /// Get the protocol treasury address.
+    pub fn get_treasury_address(&self) -> Address {
+        self.treasury_address
+    }
+
+    /// Set the protocol treasury address (typically from consensus params at init).
+    pub fn set_treasury_address(&mut self, addr: Address) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, b"treasury_address", addr.as_bytes());
+        }
+        self.treasury_address = addr;
+    }
+
+    /// Get the epoch length in blocks.
+    pub fn get_epoch_length(&self) -> u64 {
+        self.epoch_length
+    }
+
+    /// Set the epoch length in blocks (typically from consensus params at init).
+    pub fn set_epoch_length(&mut self, length: u64) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, b"epoch_length", &length.to_le_bytes());
+        }
+        self.epoch_length = length;
+    }
+
+    // --- Protocol Governance Methods ---
+
+    /// Store a protocol governance proposal (serialized).
+    pub fn put_governance_proposal(&mut self, id: H256, data: Vec<u8>) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, &[b"gov:", id.as_bytes().as_slice()].concat(), &data);
+        }
+        self.governance_proposals.insert(id, data);
+    }
+
+    /// Get a protocol governance proposal by ID (raw bytes).
+    pub fn get_governance_proposal(&self, id: &H256) -> Option<&[u8]> {
+        self.governance_proposals.get(id).map(|v| v.as_slice())
+    }
+
+    /// Get a protocol governance proposal by ID (owned, with storage fallback).
+    pub fn get_governance_proposal_owned(&self, id: &H256) -> Option<Vec<u8>> {
+        if let Some(data) = self.governance_proposals.get(id) {
+            return Some(data.clone());
+        }
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, &[b"gov:", id.as_bytes().as_slice()].concat()) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    /// Iterate all protocol governance proposals (id, raw bytes).
+    pub fn iter_governance_proposals(&self) -> impl Iterator<Item = (&H256, &Vec<u8>)> {
+        self.governance_proposals.iter()
+    }
+
+    // --- Unbonding Entry Methods ---
+
+    /// Add an unbonding entry for an address.
+    pub fn add_unbonding_entry(&mut self, address: Address, entry: UnbondingEntry) {
+        let entries = self.unbonding_entries.entry(address).or_default();
+        entries.push(entry);
+    }
+
+    /// Process matured unbonding entries: release funds for entries whose completion_time <= current_timestamp.
+    /// Returns the total amount released across all addresses.
+    pub fn process_unbonding(&mut self, current_timestamp: Timestamp) -> Amount {
+        let mut total_released = Amount::ZERO;
+        let mut releases: Vec<(Address, Amount)> = Vec::new();
+
+        for (addr, entries) in self.unbonding_entries.iter_mut() {
+            let mut released = Amount::ZERO;
+            entries.retain(|e| {
+                if e.completion_time <= current_timestamp {
+                    released = released + e.amount;
+                    false // remove matured entries
+                } else {
+                    true // keep pending entries
+                }
+            });
+            if !released.is_zero() {
+                releases.push((*addr, released));
+                total_released = total_released + released;
+            }
+        }
+
+        // Credit released amounts
+        for (addr, amount) in releases {
+            let _ = self.add_balance(&addr, amount);
+        }
+
+        // Clean up empty entries
+        self.unbonding_entries.retain(|_, v| !v.is_empty());
+
+        total_released
+    }
+
+    /// Get unbonding entries for an address.
+    pub fn get_unbonding_entries(&self, address: &Address) -> &[UnbondingEntry] {
+        self.unbonding_entries
+            .get(address)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Compute the state root by flushing dirty accounts and assets into the trie.
@@ -446,6 +770,11 @@ impl StateDB {
             contract_storage: self.contract_storage.clone(),
             pools: self.pools.clone(),
             asset_proposals: self.asset_proposals.clone(),
+            mining_states: self.mining_states.clone(),
+            governance_proposals: self.governance_proposals.clone(),
+            unbonding_entries: self.unbonding_entries.clone(),
+            treasury_address: self.treasury_address,
+            epoch_length: self.epoch_length,
             dirty_pools: self.dirty_pools.clone(),
         }
     }
@@ -478,6 +807,11 @@ impl StateDB {
         self.contract_storage = snapshot.contract_storage;
         self.pools = snapshot.pools;
         self.asset_proposals = snapshot.asset_proposals;
+        self.mining_states = snapshot.mining_states;
+        self.governance_proposals = snapshot.governance_proposals;
+        self.unbonding_entries = snapshot.unbonding_entries;
+        self.treasury_address = snapshot.treasury_address;
+        self.epoch_length = snapshot.epoch_length;
         self.dirty_pools = snapshot.dirty_pools;
     }
 }
@@ -499,6 +833,11 @@ pub struct StateSnapshot {
     contract_storage: HashMap<(Address, Vec<u8>), Vec<u8>>,
     pools: HashMap<H256, Vec<u8>>,
     asset_proposals: HashMap<H256, AssetProposal>,
+    mining_states: HashMap<H256, Vec<u8>>,
+    governance_proposals: HashMap<H256, Vec<u8>>,
+    unbonding_entries: HashMap<Address, Vec<UnbondingEntry>>,
+    treasury_address: Address,
+    epoch_length: u64,
     dirty_pools: Vec<H256>,
 }
 
@@ -659,5 +998,55 @@ mod tests {
         assert_eq!(db.get_balance(&addr1), Amount::from_vtt(100));
         assert_eq!(db.get_balance(&addr2), Amount::from_vtt(200));
         assert_eq!(db.account_count(), 2);
+    }
+
+    #[test]
+    fn register_asset_round_trip() {
+        use crate::asset::{AssetClass, AssetStatus};
+        use std::collections::BTreeMap;
+        use vtt_primitives::ChainId;
+
+        let mut db = StateDB::new();
+        let asset_id = H256::from([0xAA; 32]);
+        let issuer = Address::from([0x01; 20]);
+
+        let asset = AssetRecord {
+            id: asset_id,
+            name: "TestAsset".into(),
+            symbol: "TST".into(),
+            class: AssetClass::Equity,
+            origin_chain: ChainId(1),
+            issuer,
+            total_supply: Amount::from_vtt(1_000),
+            decimals: 18,
+            status: AssetStatus::Active,
+            compliance_policy: None,
+            valuation_oracle: None,
+            documents: BTreeMap::new(),
+            metadata_uri: String::new(),
+            created_at: 0,
+        };
+
+        assert_eq!(db.asset_count(), 0);
+        db.register_asset(asset.clone()).unwrap();
+        assert_eq!(db.asset_count(), 1);
+
+        let retrieved = db.get_asset(&asset_id).expect("asset should exist");
+        assert_eq!(retrieved.symbol, "TST");
+        assert_eq!(retrieved.issuer, issuer);
+
+        // Duplicate registration should fail
+        let err = db.register_asset(asset);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn treasury_address_persists() {
+        let mut db = StateDB::new();
+        assert_eq!(db.get_treasury_address(), Address::ZERO);
+
+        let addr = Address::from([0xBB; 20]);
+        db.set_treasury_address(addr);
+        assert_eq!(db.get_treasury_address(), addr);
     }
 }
