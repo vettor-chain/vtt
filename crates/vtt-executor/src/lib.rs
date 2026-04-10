@@ -37,6 +37,8 @@ pub enum ExecutionError {
     StakeBelowMinimum { have: Amount, need: Amount },
     #[error("cannot unstake more than staked: staked {staked}, requested {requested}")]
     UnstakeExceedsStake { staked: Amount, requested: Amount },
+    #[error("contract too large: {size} bytes (max {max})")]
+    ContractTooLarge { size: usize, max: usize },
     #[error("{0}")]
     Custom(String),
 }
@@ -602,6 +604,16 @@ fn execute_deploy_contract(
     sender: &Address,
     code: &[u8],
 ) -> Result<Vec<Log>, ExecutionError> {
+    use vtt_vm::gas::GasCosts;
+
+    // Reject oversized contracts before attempting compilation
+    if code.len() > GasCosts::MAX_CONTRACT_SIZE {
+        return Err(ExecutionError::ContractTooLarge {
+            size: code.len(),
+            max: GasCosts::MAX_CONTRACT_SIZE,
+        });
+    }
+
     let engine = VmEngine::new();
 
     // Validate the WASM bytecode compiles

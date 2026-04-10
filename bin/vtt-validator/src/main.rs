@@ -274,6 +274,8 @@ async fn main() {
 
     // Block production loop
     let mut block_timer = tokio::time::interval(Duration::from_millis(block_time_ms));
+    let mut txpool_eviction_interval = tokio::time::interval(Duration::from_secs(60));
+    txpool_eviction_interval.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -369,6 +371,14 @@ async fn main() {
                             finality_tracker.set_validator_count(new_count);
                         }
                     }
+                }
+            }
+            _ = txpool_eviction_interval.tick() => {
+                let mut pool = txpool.write().expect("txpool lock poisoned");
+                let evicted = pool.evict_expired();
+                if evicted > 0 {
+                    debug!(evicted, remaining = pool.len(), "evicted expired transactions from pool");
+                    metrics.txpool_size.set(pool.len() as i64);
                 }
             }
             _ = tokio::signal::ctrl_c() => {

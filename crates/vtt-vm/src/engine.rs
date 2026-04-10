@@ -92,6 +92,24 @@ impl VmEngine {
 
         // Set WASM memory on the context so host functions can access it
         if let Ok(memory) = instance.exports.get_memory("memory") {
+            // Enforce memory page limit: reject modules whose initial or max
+            // memory exceeds MAX_WASM_MEMORY_PAGES.
+            let mem_ty = memory.ty(&self.store);
+            if mem_ty.minimum.0 > GasCosts::MAX_WASM_MEMORY_PAGES {
+                return Err(VmError::MemoryLimitExceeded {
+                    pages: mem_ty.minimum.0,
+                    max: GasCosts::MAX_WASM_MEMORY_PAGES,
+                });
+            }
+            if let Some(max_pages) = mem_ty.maximum {
+                if max_pages.0 > GasCosts::MAX_WASM_MEMORY_PAGES {
+                    return Err(VmError::MemoryLimitExceeded {
+                        pages: max_pages.0,
+                        max: GasCosts::MAX_WASM_MEMORY_PAGES,
+                    });
+                }
+            }
+
             let ctx = env.as_mut(&mut self.store);
             ctx.set_memory(memory.clone());
             // Also set on the original context clone for post-execution reads
