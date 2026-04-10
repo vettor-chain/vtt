@@ -32,11 +32,14 @@ pub enum ChainError {
     GenesisAlreadySet,
     #[error("chain is empty, no genesis block")]
     NoGenesis,
+    #[error("block at height {block_number} reverts past finalized block {finalized}")]
+    RevertsPastFinalized { block_number: u64, finalized: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, ChainError>;
 
 /// Result of importing a block.
+#[derive(Debug)]
 pub struct ImportResult {
     pub block_hash: H256,
     pub block_number: BlockNumber,
@@ -46,8 +49,9 @@ pub struct ImportResult {
 
 /// The blockchain: manages block storage, state, and the canonical chain.
 ///
-/// Uses a longest-chain fork choice rule. Optionally backed by persistent
-/// storage (RocksDB) for blocks, headers, and canonical index.
+/// Uses a longest-chain fork choice rule with finality enforcement.
+/// Optionally backed by persistent storage (RocksDB) for blocks, headers,
+/// and canonical index.
 pub struct Chain {
     /// Block headers indexed by hash.
     headers: HashMap<H256, BlockHeader>,
@@ -67,6 +71,8 @@ pub struct Chain {
     validator_set: ValidatorSet,
     /// Optional persistent storage for blocks.
     storage: Option<Arc<dyn KeyValueStore>>,
+    /// Last finalized block number. Blocks at or below this height cannot be reverted.
+    finalized_block: BlockNumber,
 }
 
 impl Chain {
@@ -82,6 +88,7 @@ impl Chain {
             gas_config,
             validator_set: ValidatorSet::empty(0),
             storage: None,
+            finalized_block: 0,
         }
     }
 
@@ -92,6 +99,8 @@ impl Chain {
         storage: Arc<dyn KeyValueStore>,
     ) -> Self {
         let state = StateDB::with_storage(storage.clone());
+        // Restore finalized block from persistent storage
+        let finalized_block = state.finalized_block();
         Self {
             headers: HashMap::new(),
             bodies: HashMap::new(),
@@ -102,6 +111,7 @@ impl Chain {
             gas_config,
             validator_set: ValidatorSet::empty(0),
             storage: Some(storage),
+            finalized_block,
         }
     }
 
@@ -157,6 +167,17 @@ impl Chain {
             .get(&block.header.parent_hash)
             .ok_or(ChainError::UnknownParent(block.header.parent_hash))?
             .clone();
+
+        // 2b. Finality enforcement: reject blocks whose parent is at or below the
+        // finalized height when they would cause a reorg. A new block extending the
+        // canonical chain (parent_number >= finalized) is always fine. A fork whose
+        // fork point is below finalized is rejected.
+        if self.finalized_block > 0 && parent_header.number < self.finalized_block {
+            return Err(ChainError::RevertsPastFinalized {
+                block_number: block.header.number,
+                finalized: self.finalized_block,
+            });
+        }
 
         // 3. Verify transactions root
         let tx_hashes: Vec<H256> = block
@@ -241,12 +262,27 @@ impl Chain {
     }
 
     /// Fork choice rule: is this block the new head?
-    /// Simple longest-chain: the block with the highest number wins.
+    /// Longest-chain with finality enforcement: a block cannot become the
+    /// new head if adopting it would revert past the finalized block.
     fn is_new_head(&self, header: &BlockHeader) -> bool {
         match self.head() {
             Some(head) => header.number > head.number,
             None => true,
         }
+    }
+
+    /// Set the finalized block number. Persists to storage and updates the
+    /// in-memory value. Blocks at or below this height can never be reverted.
+    pub fn set_finalized_block(&mut self, number: BlockNumber) {
+        if number > self.finalized_block {
+            self.finalized_block = number;
+            self.state.set_finalized_block(number);
+        }
+    }
+
+    /// Get the current finalized block number.
+    pub fn finalized_block(&self) -> BlockNumber {
+        self.finalized_block
     }
 
     /// Get the current chain head header.
@@ -598,6 +634,77 @@ mod tests {
         let _ = (tx_root, state_root, receipts_root, gas_used);
         assert!(receipts_pre[0].success);
         assert_eq!(chain.get_balance_of(&bob_addr), Amount::from_vtt(100));
+    }
+
+    #[test]
+    fn finalized_block_defaults_to_zero() {
+        let (chain, _genesis_hash, _val_addr) = setup_chain();
+        assert_eq!(chain.finalized_block(), 0);
+    }
+
+    #[test]
+    fn set_finalized_block_persists() {
+        let (mut chain, _genesis_hash, _val_addr) = setup_chain();
+        chain.set_finalized_block(5);
+        assert_eq!(chain.finalized_block(), 5);
+    }
+
+    #[test]
+    fn set_finalized_block_only_advances() {
+        let (mut chain, _genesis_hash, _val_addr) = setup_chain();
+        chain.set_finalized_block(10);
+        chain.set_finalized_block(5); // lower value should not regress
+        assert_eq!(chain.finalized_block(), 10);
+    }
+
+    #[test]
+    fn reject_block_that_reverts_past_finalized() {
+        let (mut chain, genesis_hash, val_addr) = setup_chain();
+
+        // Import blocks 1-3
+        let block1 = make_empty_block(&mut chain, genesis_hash, 1, val_addr);
+        let hash1 = chain.import_block(block1).unwrap().block_hash;
+        let block2 = make_empty_block(&mut chain, hash1, 2, val_addr);
+        let hash2 = chain.import_block(block2).unwrap().block_hash;
+        let block3 = make_empty_block(&mut chain, hash2, 3, val_addr);
+        let _hash3 = chain.import_block(block3).unwrap().block_hash;
+
+        // Finalize block 2
+        chain.set_finalized_block(2);
+
+        // Build a fork block with a different timestamp so it has a distinct hash
+        // from the already-imported block 1, but still forks from genesis (parent at
+        // block 0 which is below finalized block 2).
+        let state_root = chain.state_mut().compute_state_root();
+        let fork_block = Block::new(
+            BlockHeader {
+                version: 1,
+                chain_id: ChainId::RELAY,
+                number: 1,
+                parent_hash: genesis_hash,
+                transactions_root: merkle_root(&[]),
+                state_root,
+                receipts_root: merkle_root(&[]),
+                validator: val_addr,
+                epoch: 0,
+                slot: 0,
+                timestamp: 1_700_000_099_999, // different timestamp = different hash
+                gas_limit: 10_000_000,
+                gas_used: 0,
+                cross_chain_root: None,
+                signature: Signature::ZERO,
+            },
+            vec![],
+        );
+
+        let result = chain.import_block(fork_block);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ChainError::RevertsPastFinalized { finalized, .. } => {
+                assert_eq!(finalized, 2);
+            }
+            other => panic!("expected RevertsPastFinalized, got {:?}", other),
+        }
     }
 }
 

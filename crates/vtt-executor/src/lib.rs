@@ -1428,6 +1428,48 @@ pub fn finalize_governance_proposals(
     finalized_count
 }
 
+/// Process double-sign slashing evidence against the state database.
+///
+/// For each valid piece of evidence, calculates the slash amount based on the
+/// offender's total stake and the configured basis-point penalty, then applies
+/// the slash (reducing their staking totals) and records an audit entry.
+///
+/// Returns a list of (offender, slashed_amount) pairs for logging/telemetry.
+pub fn process_slashing_evidence(
+    state: &mut StateDB,
+    evidence: &[vtt_consensus::slashing::DoubleSignEvidence],
+    double_sign_slash_bps: u16,
+    current_epoch: u64,
+) -> Vec<(Address, Amount)> {
+    use vtt_consensus::slashing::calculate_double_sign_slash;
+
+    let mut slashed = Vec::new();
+    for ev in evidence {
+        if !ev.is_valid() {
+            continue;
+        }
+        let offender = ev.offender();
+        let account = state.get_account(&offender);
+        let total_stake = account
+            .staking
+            .as_ref()
+            .map(|s| s.total_stake)
+            .unwrap_or(Amount::ZERO);
+
+        if total_stake.is_zero() {
+            continue;
+        }
+
+        let slash_amount = calculate_double_sign_slash(total_stake, double_sign_slash_bps);
+        let actual = state.apply_slash(&offender, slash_amount);
+        if !actual.is_zero() {
+            state.record_slash(&offender, current_epoch, "double_sign", actual);
+            slashed.push((offender, actual));
+        }
+    }
+    slashed
+}
+
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {
     ExecutionResult {
         receipt: TransactionReceipt {
@@ -1700,5 +1742,95 @@ mod tests {
         assert!(total_gas > 0);
         assert_eq!(state.get_balance(&bob_addr), Amount::from_vtt(30));
         assert_eq!(state.get_nonce(&alice_addr), 3);
+    }
+
+    #[test]
+    fn process_slashing_evidence_reduces_stake() {
+        use vtt_consensus::slashing::DoubleSignEvidence;
+        use vtt_primitives::block::BlockHeader;
+        use vtt_primitives::{Signature, H256 as PH256};
+        use vtt_state::account::StakingState;
+
+        let val = Address::from([0x10; 20]);
+        let mut state = StateDB::new();
+        let mut account = vtt_state::account::AccountState::with_balance(Amount::from_vtt(500_000));
+        account.staking = Some(StakingState {
+            total_stake: Amount::from_vtt(100_000),
+            self_stake: Amount::from_vtt(100_000),
+            commission_bps: 500,
+            active: true,
+            delegations: Vec::new(),
+            unbonding: Vec::new(),
+        });
+        state.put_account(val, account);
+
+        // Create valid double-sign evidence
+        let header_a = BlockHeader {
+            version: 1,
+            chain_id: ChainId::RELAY,
+            number: 1,
+            parent_hash: PH256::from([1u8; 32]),
+            transactions_root: PH256::ZERO,
+            state_root: PH256::ZERO,
+            receipts_root: PH256::ZERO,
+            validator: val,
+            epoch: 0,
+            slot: 0,
+            timestamp: 1_700_000_000_000,
+            gas_limit: 10_000_000,
+            gas_used: 0,
+            cross_chain_root: None,
+            signature: Signature::ZERO,
+        };
+        let mut header_b = header_a.clone();
+        header_b.number = 2; // different block = different signable bytes
+        header_b.parent_hash = PH256::from([2u8; 32]);
+
+        let evidence = vec![DoubleSignEvidence { header_a, header_b }];
+
+        let slashed = process_slashing_evidence(&mut state, &evidence, 500, 0);
+        assert_eq!(slashed.len(), 1);
+        assert_eq!(slashed[0].0, val);
+        assert_eq!(slashed[0].1, Amount::from_vtt(5_000)); // 5% of 100k
+
+        let after = state.get_account(&val);
+        let staking = after.staking.unwrap();
+        assert_eq!(staking.total_stake, Amount::from_vtt(95_000));
+    }
+
+    #[test]
+    fn process_slashing_evidence_invalid_evidence_skipped() {
+        use vtt_consensus::slashing::DoubleSignEvidence;
+        use vtt_primitives::block::BlockHeader;
+        use vtt_primitives::{Signature, H256 as PH256};
+
+        let mut state = StateDB::new();
+
+        // Same block = invalid evidence (identical signable bytes)
+        let header = BlockHeader {
+            version: 1,
+            chain_id: ChainId::RELAY,
+            number: 1,
+            parent_hash: PH256::from([1u8; 32]),
+            transactions_root: PH256::ZERO,
+            state_root: PH256::ZERO,
+            receipts_root: PH256::ZERO,
+            validator: Address::from([0x10; 20]),
+            epoch: 0,
+            slot: 0,
+            timestamp: 1_700_000_000_000,
+            gas_limit: 10_000_000,
+            gas_used: 0,
+            cross_chain_root: None,
+            signature: Signature::ZERO,
+        };
+
+        let evidence = vec![DoubleSignEvidence {
+            header_a: header.clone(),
+            header_b: header,
+        }];
+
+        let slashed = process_slashing_evidence(&mut state, &evidence, 500, 0);
+        assert!(slashed.is_empty());
     }
 }

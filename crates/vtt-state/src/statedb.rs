@@ -632,6 +632,72 @@ impl StateDB {
         self.epoch_length = length;
     }
 
+    // --- Slashing Methods ---
+
+    /// Apply a slash to a validator's stake. Reduces total_stake and self_stake by the
+    /// slash amount (capped to the available stake). Returns the actual amount slashed.
+    pub fn apply_slash(&mut self, validator: &Address, amount: Amount) -> Amount {
+        let mut account = self.get_account(validator);
+        let staking = match account.staking.as_mut() {
+            Some(s) => s,
+            None => return Amount::ZERO,
+        };
+
+        // Cap slash to total_stake
+        let slash = if amount > staking.total_stake {
+            staking.total_stake
+        } else {
+            amount
+        };
+
+        // Reduce self_stake first, overflow goes to delegations proportionally
+        let from_self = if slash > staking.self_stake {
+            staking.self_stake
+        } else {
+            slash
+        };
+        staking.self_stake = staking.self_stake - from_self;
+        staking.total_stake = staking.total_stake - slash;
+
+        self.put_account(*validator, account);
+        slash
+    }
+
+    /// Record a slashing event in persistent storage for audit/query purposes.
+    pub fn record_slash(&mut self, validator: &Address, epoch: u64, reason: &str, amount: Amount) {
+        if let Some(ref storage) = self.storage {
+            // Key: "slash:" + validator_bytes(20) + epoch(8 BE)
+            let mut key = b"slash:".to_vec();
+            key.extend_from_slice(validator.as_bytes());
+            key.extend_from_slice(&epoch.to_be_bytes());
+            let value = format!("{}:{}", reason, amount.raw());
+            let _ = storage.put(Column::ChainMeta, &key, value.as_bytes());
+        }
+    }
+
+    // --- Finality Methods ---
+
+    /// Persist the finalized block number.
+    pub fn set_finalized_block(&mut self, number: u64) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, b"finalized_block", &number.to_be_bytes());
+        }
+    }
+
+    /// Read the persisted finalized block number (0 if not yet set).
+    pub fn finalized_block(&self) -> u64 {
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(v)) = storage.get(Column::ChainMeta, b"finalized_block") {
+                if v.len() == 8 {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&v);
+                    return u64::from_be_bytes(bytes);
+                }
+            }
+        }
+        0
+    }
+
     // --- Protocol Governance Methods ---
 
     /// Store a protocol governance proposal (serialized).
@@ -1048,5 +1114,75 @@ mod tests {
         let addr = Address::from([0xBB; 20]);
         db.set_treasury_address(addr);
         assert_eq!(db.get_treasury_address(), addr);
+    }
+
+    #[test]
+    fn apply_slash_reduces_stake() {
+        use crate::account::StakingState;
+
+        let mut db = StateDB::new();
+        let val = Address::from([0x10; 20]);
+        let mut account = AccountState::with_balance(Amount::from_vtt(500_000));
+        account.staking = Some(StakingState {
+            total_stake: Amount::from_vtt(100_000),
+            self_stake: Amount::from_vtt(100_000),
+            commission_bps: 500,
+            active: true,
+            delegations: Vec::new(),
+            unbonding: Vec::new(),
+        });
+        db.put_account(val, account);
+
+        // Slash 5% = 5,000 VTT
+        let slashed = db.apply_slash(&val, Amount::from_vtt(5_000));
+        assert_eq!(slashed, Amount::from_vtt(5_000));
+
+        let after = db.get_account(&val);
+        let staking = after.staking.unwrap();
+        assert_eq!(staking.total_stake, Amount::from_vtt(95_000));
+        assert_eq!(staking.self_stake, Amount::from_vtt(95_000));
+    }
+
+    #[test]
+    fn apply_slash_capped_to_total_stake() {
+        use crate::account::StakingState;
+
+        let mut db = StateDB::new();
+        let val = Address::from([0x10; 20]);
+        let mut account = AccountState::with_balance(Amount::from_vtt(100));
+        account.staking = Some(StakingState {
+            total_stake: Amount::from_vtt(1_000),
+            self_stake: Amount::from_vtt(1_000),
+            commission_bps: 0,
+            active: true,
+            delegations: Vec::new(),
+            unbonding: Vec::new(),
+        });
+        db.put_account(val, account);
+
+        // Slash more than total stake -- should cap
+        let slashed = db.apply_slash(&val, Amount::from_vtt(999_999));
+        assert_eq!(slashed, Amount::from_vtt(1_000));
+
+        let after = db.get_account(&val);
+        let staking = after.staking.unwrap();
+        assert_eq!(staking.total_stake, Amount::ZERO);
+        assert_eq!(staking.self_stake, Amount::ZERO);
+    }
+
+    #[test]
+    fn apply_slash_no_staking_returns_zero() {
+        let mut db = StateDB::new();
+        let val = Address::from([0x10; 20]);
+        db.put_account(val, AccountState::with_balance(Amount::from_vtt(100)));
+
+        let slashed = db.apply_slash(&val, Amount::from_vtt(50));
+        assert_eq!(slashed, Amount::ZERO);
+    }
+
+    #[test]
+    fn finalized_block_defaults_to_zero() {
+        let db = StateDB::new();
+        assert_eq!(db.finalized_block(), 0);
     }
 }
