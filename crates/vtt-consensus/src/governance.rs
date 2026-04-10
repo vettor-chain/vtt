@@ -24,6 +24,8 @@ pub enum ProposalAction {
     TreasurySpend { recipient: Address, amount: Amount },
     /// Signal readiness for a protocol upgrade.
     ProtocolUpgrade { version: u32, description: String },
+    /// Pause or unpause the DEX.
+    DexPause(bool),
 }
 
 /// Status of a governance proposal.

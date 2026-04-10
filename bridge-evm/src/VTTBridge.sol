@@ -48,9 +48,22 @@ contract VTTBridge {
         uint256 amount
     );
 
-    event RelayerUpdated(address indexed oldRelayer, address indexed newRelayer);
+    event RelayerUpdated(address indexed newRelayer);
     event FeeUpdated(uint256 oldFee, uint256 newFee);
     event FeesWithdrawn(address indexed to, uint256 amount);
+
+    // ─── Timelock ──────────────────────────────────────────────────────
+    uint256 public constant TIMELOCK_DELAY = 2 days;
+
+    struct TimelockAction {
+        uint256 executeAfter;
+        bool executed;
+    }
+
+    mapping(bytes32 => TimelockAction) public timelockActions;
+
+    event TimelockQueued(bytes32 indexed actionHash, uint256 executeAfter);
+    event TimelockExecuted(bytes32 indexed actionHash);
 
     modifier onlyRelayer() {
         require(msg.sender == relayer, "Bridge: not relayer");
@@ -150,9 +163,22 @@ contract VTTBridge {
 
     // ─── ADMIN ──────────────────────────────────────────────────────────
 
-    function setRelayer(address _relayer) external onlyOwner {
-        emit RelayerUpdated(relayer, _relayer);
+    function queueSetRelayer(address _relayer) external onlyOwner {
+        bytes32 hash = keccak256(abi.encode("setRelayer", _relayer));
+        timelockActions[hash] = TimelockAction(block.timestamp + TIMELOCK_DELAY, false);
+        emit TimelockQueued(hash, block.timestamp + TIMELOCK_DELAY);
+    }
+
+    function executeSetRelayer(address _relayer) external onlyOwner {
+        bytes32 hash = keccak256(abi.encode("setRelayer", _relayer));
+        TimelockAction storage action = timelockActions[hash];
+        require(action.executeAfter > 0, "Bridge: not queued");
+        require(block.timestamp >= action.executeAfter, "Bridge: timelock active");
+        require(!action.executed, "Bridge: already executed");
+        action.executed = true;
         relayer = _relayer;
+        emit RelayerUpdated(_relayer);
+        emit TimelockExecuted(hash);
     }
 
     function setFee(uint256 _feeBps) external onlyOwner {

@@ -904,6 +904,8 @@ fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo
         ProposalAction::RegisterChain { .. } => "RegisterChain",
         ProposalAction::TreasurySpend { .. } => "TreasurySpend",
         ProposalAction::ProtocolUpgrade { .. } => "ProtocolUpgrade",
+        ProposalAction::DexPause(true) => "DexPause",
+        ProposalAction::DexPause(false) => "DexUnpause",
     }
     .to_string();
 
