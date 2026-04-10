@@ -18,6 +18,12 @@ use vtt_txpool::{TxPool, TxPoolConfig};
 /// Maximum number of blocks to request in a single sync batch.
 const SYNC_BATCH_SIZE: u32 = 100;
 
+/// How often (in blocks) to trigger RocksDB pruning.
+const PRUNE_INTERVAL_BLOCKS: u64 = 10_000;
+
+/// Number of recent blocks to keep when pruning (~3.5 days at 3s/block).
+const KEEP_RECENT_BLOCKS: u64 = 100_000;
+
 /// Monotonically increasing request ID for block range requests.
 static NEXT_REQUEST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -124,23 +130,27 @@ async fn main() {
     // Initialize chain (with optional persistent storage)
     let consensus = ConsensusEngine::new(genesis_config.chain.consensus.clone());
     let chain_id = genesis_config.chain.chain_id;
-    let mut chain = if let Some(ref dir) = data_dir {
+    let rocks_store: Option<Arc<RocksStore>> = if let Some(ref dir) = data_dir {
         let db_path = std::path::Path::new(dir);
         if let Err(e) = std::fs::create_dir_all(db_path) {
             error!(%e, path = dir, "failed to create data directory");
             return;
         }
-        let store = match RocksStore::open(db_path) {
+        match RocksStore::open(db_path) {
             Ok(s) => {
                 info!(path = dir, "opened RocksDB for persistent storage");
-                Arc::new(s) as Arc<dyn vtt_storage::KeyValueStore>
+                Some(Arc::new(s))
             }
             Err(e) => {
                 error!(%e, path = dir, "failed to open RocksDB");
                 return;
             }
-        };
-        Chain::with_storage(consensus, genesis_config.chain.gas.clone(), store)
+        }
+    } else {
+        None
+    };
+    let mut chain = if let Some(ref store) = rocks_store {
+        Chain::with_storage(consensus, genesis_config.chain.gas.clone(), store.clone() as Arc<dyn vtt_storage::KeyValueStore>)
     } else {
         Chain::new(consensus, genesis_config.chain.gas.clone())
     };
@@ -269,6 +279,26 @@ async fn main() {
                         let responses = handle_network_message(*msg, &chain, &txpool, &metrics);
                         for resp in responses {
                             let _ = network.broadcast_block(&resp);
+                        }
+
+                        // Periodic RocksDB pruning
+                        if let Some(ref store) = rocks_store {
+                            if let Ok(chain_r) = chain.read() {
+                                if let Some(height) = chain_r.height() {
+                                    if height > 0 && height % PRUNE_INTERVAL_BLOCKS == 0 {
+                                        match store.prune_old_blocks(KEEP_RECENT_BLOCKS, height) {
+                                            Ok(pruned) if pruned > 0 => {
+                                                info!(height, pruned, "pruned old block data");
+                                                store.compact();
+                                            }
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                warn!(%e, "failed to prune old blocks");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

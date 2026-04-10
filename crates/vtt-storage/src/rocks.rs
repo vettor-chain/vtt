@@ -11,6 +11,39 @@ pub struct RocksStore {
 }
 
 impl RocksStore {
+    /// Prune old block data, keeping the most recent `keep_recent` blocks.
+    /// Removes BlockBodies and Receipts for blocks older than (current_height - keep_recent).
+    /// Returns the number of entries pruned.
+    pub fn prune_old_blocks(&self, keep_recent: u64, current_height: u64) -> Result<u64> {
+        if current_height <= keep_recent {
+            return Ok(0);
+        }
+
+        let prune_below = current_height - keep_recent;
+        let mut pruned = 0u64;
+
+        for column in [Column::BlockBodies, Column::Receipts] {
+            for height in 0..prune_below {
+                let key = height.to_be_bytes();
+                if self.contains(column, &key)? {
+                    self.delete(column, &key)?;
+                    pruned += 1;
+                }
+            }
+        }
+
+        Ok(pruned)
+    }
+
+    /// Trigger manual compaction across all column families.
+    pub fn compact(&self) {
+        for column in Column::ALL {
+            if let Some(cf) = self.db.cf_handle(column.name()) {
+                self.db.compact_range_cf(&cf, None::<&[u8]>, None::<&[u8]>);
+            }
+        }
+    }
+
     /// Open or create a RocksDB database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let mut db_opts = Options::default();
@@ -187,5 +220,58 @@ mod tests {
             store.get(Column::ChainIndex, b"height").unwrap(),
             Some(b"101".to_vec())
         );
+    }
+
+    #[test]
+    fn rocks_prune_old_blocks() {
+        let (store, _dir) = open_test_db();
+
+        // Insert block bodies and receipts for blocks 0..10
+        for height in 0u64..10 {
+            let key = height.to_be_bytes();
+            store
+                .put(Column::BlockBodies, &key, b"body")
+                .unwrap();
+            store
+                .put(Column::Receipts, &key, b"receipt")
+                .unwrap();
+        }
+
+        // Prune keeping last 5 blocks (current_height=10, keep_recent=5 -> prune below 5)
+        let pruned = store.prune_old_blocks(5, 10).unwrap();
+        // 5 bodies + 5 receipts = 10 entries pruned
+        assert_eq!(pruned, 10);
+
+        // Blocks 0..5 should be gone
+        for height in 0u64..5 {
+            let key = height.to_be_bytes();
+            assert!(!store.contains(Column::BlockBodies, &key).unwrap());
+            assert!(!store.contains(Column::Receipts, &key).unwrap());
+        }
+
+        // Blocks 5..10 should still exist
+        for height in 5u64..10 {
+            let key = height.to_be_bytes();
+            assert!(store.contains(Column::BlockBodies, &key).unwrap());
+            assert!(store.contains(Column::Receipts, &key).unwrap());
+        }
+    }
+
+    #[test]
+    fn rocks_prune_nothing_when_below_threshold() {
+        let (store, _dir) = open_test_db();
+        // current_height <= keep_recent, nothing to prune
+        let pruned = store.prune_old_blocks(100, 50).unwrap();
+        assert_eq!(pruned, 0);
+    }
+
+    #[test]
+    fn rocks_compact_does_not_panic() {
+        let (store, _dir) = open_test_db();
+        store
+            .put(Column::BlockHeaders, b"key", b"value")
+            .unwrap();
+        // Just verify compact does not panic
+        store.compact();
     }
 }

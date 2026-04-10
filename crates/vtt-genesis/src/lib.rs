@@ -143,6 +143,43 @@ impl GenesisConfig {
     }
 }
 
+/// Validate a genesis configuration before building the genesis block.
+///
+/// Returns `Ok(())` if the configuration is valid, or an error string describing
+/// the first validation failure found.
+pub fn validate_genesis(config: &GenesisConfig) -> Result<(), String> {
+    // Must have at least one validator
+    if config.validators.is_empty() {
+        return Err("Genesis must have at least 1 validator".into());
+    }
+
+    // chain_id of 0 is valid (relay chain), so we do not reject it.
+    // However, the consensus epoch_length must be non-zero.
+    if config.chain.consensus.epoch_length == 0 {
+        return Err("epoch_length cannot be 0".into());
+    }
+
+    // Check total supply is non-zero (allocations + staked)
+    let total_allocated: u128 = config.allocations.iter().map(|a| a.balance.raw()).sum();
+    let total_staked: u128 = config.validators.iter().map(|v| v.self_stake.raw()).sum();
+    if total_allocated == 0 && total_staked == 0 {
+        return Err("Genesis has no tokens allocated".into());
+    }
+
+    // Check min self-stake for each validator
+    let min_stake = config.chain.consensus.min_self_stake;
+    for validator in &config.validators {
+        if validator.self_stake < min_stake {
+            return Err(format!(
+                "Validator {} stake {} below minimum {}",
+                validator.address, validator.self_stake, min_stake
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// The result of building a genesis block.
 pub struct GenesisResult {
     /// The genesis block (block 0).
@@ -154,7 +191,14 @@ pub struct GenesisResult {
 }
 
 /// Build the genesis block and initial state from a genesis configuration.
+///
+/// Panics if `validate_genesis` finds configuration errors (call `validate_genesis`
+/// first if you want to handle errors gracefully).
 pub fn build_genesis(config: &GenesisConfig) -> GenesisResult {
+    if let Err(e) = validate_genesis(config) {
+        panic!("Invalid genesis configuration: {e}");
+    }
+
     let mut state = StateDB::new();
 
     // 1. Apply initial allocations
@@ -391,6 +435,7 @@ mod tests {
 
     #[test]
     fn genesis_with_custom_config() {
+        let validator_addr = Address::from([0xAA; 20]);
         let config = GenesisConfig {
             chain: ChainConfig {
                 chain_id: ChainId::new(1),
@@ -400,19 +445,23 @@ mod tests {
             },
             timestamp: 1_700_000_000_000,
             allocations: vec![GenesisAllocation {
-                address: Address::from([0xAA; 20]),
+                address: validator_addr,
                 balance: Amount::from_vtt(10_000_000),
             }],
-            validators: vec![],
+            validators: vec![GenesisValidator {
+                address: validator_addr,
+                self_stake: Amount::from_vtt(100_000),
+                commission_bps: 500,
+            }],
         };
 
         let result = build_genesis(&config);
         assert_eq!(result.block.header.chain_id, ChainId::new(1));
         assert_ne!(result.state_root, H256::ZERO);
 
-        // Balance = 10M allocation - 100K for DEX pool
-        let balance = result.state.get_balance(&Address::from([0xAA; 20]));
-        assert_eq!(balance, Amount::from_vtt(9_900_000));
+        // Balance = 10M allocation - 100K stake - 100K DEX pool
+        let balance = result.state.get_balance(&validator_addr);
+        assert_eq!(balance, Amount::from_vtt(9_800_000));
     }
 
     #[test]
@@ -463,5 +512,120 @@ mod tests {
         // Build it to verify it's valid
         let result = build_genesis(&parsed);
         assert_eq!(result.block.header.number, 0);
+    }
+
+    // --- Genesis validation tests ---
+
+    #[test]
+    fn validate_genesis_ok() {
+        let config = GenesisConfig::dev_default();
+        assert!(validate_genesis(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_genesis_empty_validators() {
+        let config = GenesisConfig {
+            chain: ChainConfig {
+                chain_id: ChainId::new(1),
+                name: "Test".to_string(),
+                consensus: ConsensusParams::default(),
+                gas: GasConfig::default(),
+            },
+            timestamp: 1_000_000,
+            allocations: vec![GenesisAllocation {
+                address: Address::from([0x01; 20]),
+                balance: Amount::from_vtt(1_000),
+            }],
+            validators: vec![],
+        };
+        let err = validate_genesis(&config).unwrap_err();
+        assert!(err.contains("at least 1 validator"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_genesis_zero_epoch_length() {
+        let addr = Address::from([0x01; 20]);
+        let config = GenesisConfig {
+            chain: ChainConfig {
+                chain_id: ChainId::new(1),
+                name: "Test".to_string(),
+                consensus: ConsensusParams {
+                    epoch_length: 0,
+                    ..Default::default()
+                },
+                gas: GasConfig::default(),
+            },
+            timestamp: 1_000_000,
+            allocations: vec![GenesisAllocation {
+                address: addr,
+                balance: Amount::from_vtt(200_000),
+            }],
+            validators: vec![GenesisValidator {
+                address: addr,
+                self_stake: Amount::from_vtt(100_000),
+                commission_bps: 500,
+            }],
+        };
+        let err = validate_genesis(&config).unwrap_err();
+        assert!(err.contains("epoch_length"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_genesis_zero_supply() {
+        let addr = Address::from([0x01; 20]);
+        let config = GenesisConfig {
+            chain: ChainConfig {
+                chain_id: ChainId::new(1),
+                name: "Test".to_string(),
+                consensus: ConsensusParams {
+                    min_self_stake: Amount::ZERO,
+                    ..Default::default()
+                },
+                gas: GasConfig::default(),
+            },
+            timestamp: 1_000_000,
+            allocations: vec![],
+            validators: vec![GenesisValidator {
+                address: addr,
+                self_stake: Amount::ZERO,
+                commission_bps: 500,
+            }],
+        };
+        let err = validate_genesis(&config).unwrap_err();
+        assert!(err.contains("no tokens allocated"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_genesis_insufficient_stake() {
+        let addr = Address::from([0x01; 20]);
+        let config = GenesisConfig {
+            chain: ChainConfig {
+                chain_id: ChainId::new(1),
+                name: "Test".to_string(),
+                consensus: ConsensusParams {
+                    min_self_stake: Amount::from_vtt(100_000),
+                    ..Default::default()
+                },
+                gas: GasConfig::default(),
+            },
+            timestamp: 1_000_000,
+            allocations: vec![GenesisAllocation {
+                address: addr,
+                balance: Amount::from_vtt(200_000),
+            }],
+            validators: vec![GenesisValidator {
+                address: addr,
+                self_stake: Amount::from_vtt(50_000), // below min_self_stake of 100k
+                commission_bps: 500,
+            }],
+        };
+        let err = validate_genesis(&config).unwrap_err();
+        assert!(err.contains("below minimum"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_genesis_testnet_ok() {
+        let config = GenesisConfig::testnet_default();
+        assert!(validate_genesis(&config).is_ok());
     }
 }
