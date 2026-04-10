@@ -180,9 +180,45 @@ contract BridgeTest is Test {
         bridge.setFee(600); // 6% > 5% max
     }
 
-    function test_set_relayer() public {
-        bridge.setRelayer(address(0x1234));
-        assertEq(bridge.relayer(), address(0x1234));
+    // ─── Timelock ───
+
+    function test_timelock_setRelayer() public {
+        address newRelayer = address(0x1234);
+
+        // Queue the relayer change
+        bridge.queueSetRelayer(newRelayer);
+
+        // Try execute immediately -- should revert (timelock active)
+        vm.expectRevert("Bridge: timelock active");
+        bridge.executeSetRelayer(newRelayer);
+
+        // Warp 2 days
+        vm.warp(block.timestamp + 2 days);
+
+        // Execute succeeds
+        bridge.executeSetRelayer(newRelayer);
+        assertEq(bridge.relayer(), newRelayer);
+    }
+
+    function test_timelock_not_queued_reverts() public {
+        address newRelayer = address(0x1234);
+
+        // Try execute without queueing
+        vm.expectRevert("Bridge: not queued");
+        bridge.executeSetRelayer(newRelayer);
+    }
+
+    function test_timelock_already_executed_reverts() public {
+        address newRelayer = address(0x1234);
+
+        // Queue and execute
+        bridge.queueSetRelayer(newRelayer);
+        vm.warp(block.timestamp + 2 days);
+        bridge.executeSetRelayer(newRelayer);
+
+        // Try execute again
+        vm.expectRevert("Bridge: already executed");
+        bridge.executeSetRelayer(newRelayer);
     }
 
     // ─── Pause mechanism (Task 13) ───

@@ -1163,9 +1163,11 @@ fn execute_governance_propose(
             version: 0,
             description: description.to_string(),
         },
+        "dex_pause" => ProposalAction::DexPause(true),
+        "dex_unpause" => ProposalAction::DexPause(false),
         other => {
             return Err(ExecutionError::Custom(format!(
-                "invalid action_type '{}', must be one of: parameter_change, treasury_spend, signal",
+                "invalid action_type '{}', must be one of: parameter_change, treasury_spend, signal, dex_pause, dex_unpause",
                 other
             )));
         }
@@ -1405,6 +1407,10 @@ pub fn finalize_governance_proposals(
                 }
                 ProposalAction::ProtocolUpgrade { version, description } => {
                     debug!(?proposal_id, version, description, "protocol upgrade signal passed");
+                }
+                ProposalAction::DexPause(paused) => {
+                    state.set_dex_paused(*paused);
+                    debug!(?proposal_id, paused, "DEX pause state updated via governance");
                 }
             }
 

@@ -16,6 +16,7 @@ pub enum DexError {
     NotAuthorized,
     MiningNotActive,
     NothingToClaim,
+    DexPaused,
 }
 
 impl fmt::Display for DexError {
@@ -36,6 +37,7 @@ impl fmt::Display for DexError {
             Self::NotAuthorized => write!(f, "not authorized for this operation"),
             Self::MiningNotActive => write!(f, "liquidity mining not active for this pool"),
             Self::NothingToClaim => write!(f, "nothing to claim"),
+            Self::DexPaused => write!(f, "DEX is paused"),
         }
     }
 }

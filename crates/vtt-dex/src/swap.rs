@@ -15,6 +15,10 @@ pub fn execute_swap(
     amount_in: Amount,
     min_amount_out: Amount,
 ) -> Result<Amount, DexError> {
+    if state.is_dex_paused() {
+        return Err(DexError::DexPaused);
+    }
+
     let mut pool = load_pool(state, pool_id)?;
 
     if amount_in.0 == 0 {

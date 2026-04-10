@@ -61,6 +61,8 @@ pub struct StateDB {
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
     epoch_length: u64,
+    /// Whether the DEX is paused (governance action can toggle this).
+    dex_paused: bool,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
@@ -90,6 +92,7 @@ impl StateDB {
             unbonding_entries: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
+            dex_paused: false,
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -115,6 +118,7 @@ impl StateDB {
             unbonding_entries: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
+            dex_paused: false,
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -632,6 +636,20 @@ impl StateDB {
         self.epoch_length = length;
     }
 
+    /// Check whether the DEX is paused.
+    pub fn is_dex_paused(&self) -> bool {
+        self.dex_paused
+    }
+
+    /// Set the DEX paused state (controlled via governance).
+    pub fn set_dex_paused(&mut self, paused: bool) {
+        if let Some(ref storage) = self.storage {
+            let val = if paused { [1u8] } else { [0u8] };
+            let _ = storage.put(Column::ChainMeta, b"dex:paused", &val);
+        }
+        self.dex_paused = paused;
+    }
+
     // --- Protocol Governance Methods ---
 
     /// Store a protocol governance proposal (serialized).
@@ -775,6 +793,7 @@ impl StateDB {
             unbonding_entries: self.unbonding_entries.clone(),
             treasury_address: self.treasury_address,
             epoch_length: self.epoch_length,
+            dex_paused: self.dex_paused,
             dirty_pools: self.dirty_pools.clone(),
         }
     }
@@ -812,6 +831,7 @@ impl StateDB {
         self.unbonding_entries = snapshot.unbonding_entries;
         self.treasury_address = snapshot.treasury_address;
         self.epoch_length = snapshot.epoch_length;
+        self.dex_paused = snapshot.dex_paused;
         self.dirty_pools = snapshot.dirty_pools;
     }
 }
@@ -838,6 +858,7 @@ pub struct StateSnapshot {
     unbonding_entries: HashMap<Address, Vec<UnbondingEntry>>,
     treasury_address: Address,
     epoch_length: u64,
+    dex_paused: bool,
     dirty_pools: Vec<H256>,
 }
 

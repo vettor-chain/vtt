@@ -18,6 +18,9 @@ pub fn create_pool(
     amount_b: Amount,
     current_epoch: Epoch,
 ) -> Result<PoolState, DexError> {
+    if state.is_dex_paused() {
+        return Err(DexError::DexPaused);
+    }
     if token_a == token_b {
         return Err(DexError::SameToken);
     }
@@ -84,6 +87,10 @@ pub fn add_liquidity(
     amount_b: Amount,
     min_lp: Amount,
 ) -> Result<Amount, DexError> {
+    if state.is_dex_paused() {
+        return Err(DexError::DexPaused);
+    }
+
     let mut pool = load_pool(state, pool_id)?;
 
     if pool.reserve_a.0 == 0 || pool.reserve_b.0 == 0 {
@@ -145,6 +152,10 @@ pub fn remove_liquidity(
     min_a: Amount,
     min_b: Amount,
 ) -> Result<(Amount, Amount), DexError> {
+    if state.is_dex_paused() {
+        return Err(DexError::DexPaused);
+    }
+
     let mut pool = load_pool(state, pool_id)?;
 
     if lp_amount.0 == 0 {
