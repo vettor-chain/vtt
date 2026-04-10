@@ -5,7 +5,8 @@ use vtt_primitives::amount::Amount;
 use vtt_primitives::transaction::Log;
 use vtt_primitives::{Address, BlockNumber, ChainId, Timestamp};
 
-use crate::gas::GasMeter;
+use crate::error::VmError;
+use crate::gas::{GasCosts, GasMeter};
 
 /// Execution context shared between the VM and host functions.
 /// Provides contract storage, caller info, and block context.
@@ -35,6 +36,10 @@ pub struct ExecutionContext {
     pub balance_changes: Arc<Mutex<Vec<BalanceChange>>>,
     /// WASM linear memory reference, set after instantiation.
     pub wasm_memory: Arc<Mutex<Option<wasmer::Memory>>>,
+    /// Current call stack depth (for nested contract calls).
+    pub call_depth: u32,
+    /// Maximum allowed call stack depth.
+    pub max_call_depth: u32,
 }
 
 /// A pending balance change from contract execution.
@@ -72,6 +77,8 @@ impl ExecutionContext {
             logs: Arc::new(Mutex::new(Vec::new())),
             balance_changes: Arc::new(Mutex::new(Vec::new())),
             wasm_memory: Arc::new(Mutex::new(None)),
+            call_depth: 0,
+            max_call_depth: GasCosts::MAX_CALL_STACK_DEPTH,
         }
     }
 
@@ -130,6 +137,20 @@ impl ExecutionContext {
     /// Get gas used.
     pub fn gas_used(&self) -> u64 {
         self.gas.used()
+    }
+
+    /// Increment call depth for a nested contract call.
+    /// Returns an error if the maximum depth would be exceeded.
+    pub fn increment_call_depth(&mut self) -> Result<(), VmError> {
+        let new_depth = self.call_depth + 1;
+        if new_depth > self.max_call_depth {
+            return Err(VmError::CallStackOverflow {
+                depth: new_depth,
+                max: self.max_call_depth,
+            });
+        }
+        self.call_depth = new_depth;
+        Ok(())
     }
 }
 

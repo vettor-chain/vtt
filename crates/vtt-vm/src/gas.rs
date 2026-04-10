@@ -53,6 +53,15 @@ impl GasCosts {
     pub const ASSET_MINT: u64 = 10000;
     pub const ASSET_TRANSFER: u64 = 5000;
     pub const ORACLE_READ: u64 = 500;
+
+    // --- VM resource limits ---
+
+    /// Maximum contract bytecode size: 512 KB.
+    pub const MAX_CONTRACT_SIZE: usize = 512 * 1024;
+    /// Maximum WASM linear memory pages (256 pages = 16 MB).
+    pub const MAX_WASM_MEMORY_PAGES: u32 = 256;
+    /// Maximum nested call stack depth.
+    pub const MAX_CALL_STACK_DEPTH: u32 = 64;
 }
 
 #[cfg(test)]

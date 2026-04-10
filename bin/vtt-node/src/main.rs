@@ -238,6 +238,8 @@ async fn main() {
 
     // Main event loop
     info!("entering main event loop (Ctrl+C to stop)");
+    let mut txpool_eviction_interval = tokio::time::interval(Duration::from_secs(60));
+    txpool_eviction_interval.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
             event = network.next_event() => {
@@ -271,6 +273,14 @@ async fn main() {
                             let _ = network.broadcast_block(&resp);
                         }
                     }
+                }
+            }
+            _ = txpool_eviction_interval.tick() => {
+                let mut pool = txpool.write().expect("txpool lock poisoned");
+                let evicted = pool.evict_expired();
+                if evicted > 0 {
+                    debug!(evicted, remaining = pool.len(), "evicted expired transactions from pool");
+                    metrics.txpool_size.set(pool.len() as i64);
                 }
             }
             _ = tokio::signal::ctrl_c() => {

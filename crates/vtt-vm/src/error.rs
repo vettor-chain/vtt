@@ -16,4 +16,8 @@ pub enum VmError {
     InvalidReturn,
     #[error("memory access error: {0}")]
     MemoryAccess(String),
+    #[error("memory limit exceeded: {pages} pages (max {max})")]
+    MemoryLimitExceeded { pages: u32, max: u32 },
+    #[error("call stack overflow: depth {depth} exceeds max {max}")]
+    CallStackOverflow { depth: u32, max: u32 },
 }

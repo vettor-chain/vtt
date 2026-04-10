@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tracing::debug;
@@ -31,6 +32,8 @@ pub struct TxPoolConfig {
     pub max_per_account: usize,
     /// Minimum gas price to accept a transaction.
     pub min_gas_price: Amount,
+    /// Time-to-live for transactions in seconds (0 = no expiry).
+    pub tx_ttl_secs: u64,
 }
 
 impl Default for TxPoolConfig {
@@ -39,8 +42,16 @@ impl Default for TxPoolConfig {
             max_size: 10_000,
             max_per_account: 100,
             min_gas_price: Amount::from_raw(1_000_000_000), // 1 gwei
+            tx_ttl_secs: 3600, // 1 hour
         }
     }
+}
+
+/// A transaction entry in the pool with metadata.
+struct PoolEntry {
+    tx: SignedTransaction,
+    sender: Address,
+    inserted_at: Instant,
 }
 
 /// Transaction pool (mempool) for pending transactions.
@@ -50,8 +61,8 @@ impl Default for TxPoolConfig {
 /// gas price (highest first), then by nonce within each sender.
 pub struct TxPool {
     config: TxPoolConfig,
-    /// All transactions indexed by hash.
-    by_hash: HashMap<H256, SignedTransaction>,
+    /// All transactions indexed by hash (with metadata).
+    by_hash: HashMap<H256, PoolEntry>,
     /// Transactions grouped by sender, ordered by nonce.
     by_sender: HashMap<Address, BTreeMap<u64, H256>>,
     /// Transaction hashes for deduplication.
@@ -122,7 +133,14 @@ impl TxPool {
         );
 
         sender_txs.insert(tx.payload.nonce, tx_hash);
-        self.by_hash.insert(tx_hash, tx);
+        self.by_hash.insert(
+            tx_hash,
+            PoolEntry {
+                tx,
+                sender,
+                inserted_at: Instant::now(),
+            },
+        );
         self.known.insert(tx_hash);
 
         Ok(tx_hash)
@@ -130,16 +148,15 @@ impl TxPool {
 
     /// Remove a transaction by hash.
     pub fn remove(&mut self, tx_hash: &H256) -> Option<SignedTransaction> {
-        if let Some(tx) = self.by_hash.remove(tx_hash) {
-            let sender = vtt_crypto::address_from_public_key(&tx.public_key);
-            if let Some(sender_txs) = self.by_sender.get_mut(&sender) {
-                sender_txs.remove(&tx.payload.nonce);
+        if let Some(entry) = self.by_hash.remove(tx_hash) {
+            if let Some(sender_txs) = self.by_sender.get_mut(&entry.sender) {
+                sender_txs.remove(&entry.tx.payload.nonce);
                 if sender_txs.is_empty() {
-                    self.by_sender.remove(&sender);
+                    self.by_sender.remove(&entry.sender);
                 }
             }
             // Keep in `known` to prevent re-adding
-            Some(tx)
+            Some(entry.tx)
         } else {
             None
         }
@@ -168,7 +185,7 @@ impl TxPool {
 
     /// Get a transaction by hash.
     pub fn get(&self, tx_hash: &H256) -> Option<&SignedTransaction> {
-        self.by_hash.get(tx_hash)
+        self.by_hash.get(tx_hash).map(|e| &e.tx)
     }
 
     /// Check if the pool contains a transaction.
@@ -195,8 +212,8 @@ impl TxPool {
                 if *nonce != expected_nonce {
                     break; // Gap in nonces, stop
                 }
-                if let Some(tx) = self.by_hash.get(tx_hash) {
-                    candidates.push(tx);
+                if let Some(entry) = self.by_hash.get(tx_hash) {
+                    candidates.push(&entry.tx);
                 }
                 expected_nonce += 1;
             }
@@ -206,6 +223,27 @@ impl TxPool {
         candidates.sort_by(|a, b| b.payload.gas_price.cmp(&a.payload.gas_price));
 
         candidates.into_iter().take(max_count).cloned().collect()
+    }
+
+    /// Evict transactions that have exceeded the configured TTL.
+    /// Returns the number of expired transactions removed.
+    pub fn evict_expired(&mut self) -> usize {
+        if self.config.tx_ttl_secs == 0 {
+            return 0;
+        }
+        let now = Instant::now();
+        let ttl = Duration::from_secs(self.config.tx_ttl_secs);
+        let expired: Vec<H256> = self
+            .by_hash
+            .iter()
+            .filter(|(_, e)| now.duration_since(e.inserted_at) > ttl)
+            .map(|(h, _)| *h)
+            .collect();
+        let count = expired.len();
+        for hash in expired {
+            self.remove(&hash);
+        }
+        count
     }
 
     /// Number of transactions in the pool.
