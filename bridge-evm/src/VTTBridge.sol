@@ -24,7 +24,10 @@ contract VTTBridge {
     address public owner;
 
     uint256 public protocolFeeBps; // e.g. 10 = 0.1%
-    uint256 public collectedFees;
+    uint256 public collectedFeesWVTT;
+    uint256 public collectedFeesUSDT;
+
+    bool public paused;
 
     // Nonce to prevent replay attacks
     mapping(bytes32 => bool) public processedWithdrawals;
@@ -50,7 +53,9 @@ contract VTTBridge {
 
     event RelayerUpdated(address indexed oldRelayer, address indexed newRelayer);
     event FeeUpdated(uint256 oldFee, uint256 newFee);
-    event FeesWithdrawn(address indexed to, uint256 amount);
+    event FeesWithdrawn(address indexed to, uint256 wvttAmount, uint256 usdtAmount);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
 
     modifier onlyRelayer() {
         require(msg.sender == relayer, "Bridge: not relayer");
@@ -60,6 +65,21 @@ contract VTTBridge {
     modifier onlyOwner() {
         require(msg.sender == owner, "Bridge: not owner");
         _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "Bridge: paused");
+        _;
+    }
+
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     constructor(address _wvtt, address _usdt, address _relayer, uint256 _feeBps) {
@@ -76,7 +96,7 @@ contract VTTBridge {
      * @notice Deposit wVTT to receive VTT on VTT chain.
      *         Burns wVTT and emits event for relayer.
      */
-    function depositWVTT(uint256 amount, bytes32 vttDestination) external {
+    function depositWVTT(uint256 amount, bytes32 vttDestination) external whenNotPaused {
         require(amount > 0, "Bridge: zero amount");
 
         uint256 fee = (amount * protocolFeeBps) / 10000;
@@ -86,7 +106,7 @@ contract VTTBridge {
         wvtt.burn(msg.sender, amount);
 
         if (fee > 0) {
-            collectedFees += fee;
+            collectedFeesWVTT += fee;
         }
 
         depositNonce++;
@@ -97,7 +117,7 @@ contract VTTBridge {
      * @notice Deposit USDT to receive vUSDT on VTT chain.
      *         Locks USDT in this contract and emits event for relayer.
      */
-    function depositUSDT(uint256 amount, bytes32 vttDestination) external {
+    function depositUSDT(uint256 amount, bytes32 vttDestination) external whenNotPaused {
         require(amount > 0, "Bridge: zero amount");
 
         uint256 fee = (amount * protocolFeeBps) / 10000;
@@ -107,7 +127,7 @@ contract VTTBridge {
         require(usdt.transferFrom(msg.sender, address(this), amount), "Bridge: USDT transfer failed");
 
         if (fee > 0) {
-            collectedFees += fee;
+            collectedFeesUSDT += fee;
         }
 
         depositNonce++;
@@ -124,7 +144,7 @@ contract VTTBridge {
         bytes32 vttTxHash,
         address recipient,
         uint256 amount
-    ) external onlyRelayer {
+    ) external onlyRelayer whenNotPaused {
         require(!processedWithdrawals[vttTxHash], "Bridge: already processed");
         processedWithdrawals[vttTxHash] = true;
 
@@ -139,7 +159,7 @@ contract VTTBridge {
         bytes32 vttTxHash,
         address recipient,
         uint256 amount
-    ) external onlyRelayer {
+    ) external onlyRelayer whenNotPaused {
         require(!processedWithdrawals[vttTxHash], "Bridge: already processed");
         require(usdt.balanceOf(address(this)) >= amount, "Bridge: insufficient USDT reserve");
         processedWithdrawals[vttTxHash] = true;
@@ -162,14 +182,22 @@ contract VTTBridge {
     }
 
     function withdrawFees(address to) external onlyOwner {
-        uint256 amount = collectedFees;
-        collectedFees = 0;
-        // Fees are in wVTT terms (burned) or USDT terms (locked)
-        // For simplicity, withdraw USDT fees
-        if (amount > 0 && usdt.balanceOf(address(this)) >= amount) {
-            require(usdt.transfer(to, amount), "Bridge: fee withdrawal failed");
+        require(to != address(0), "Bridge: zero address");
+
+        uint256 wvttFees = collectedFeesWVTT;
+        uint256 usdtFees = collectedFeesUSDT;
+
+        if (wvttFees > 0) {
+            collectedFeesWVTT = 0;
+            wvtt.mint(to, wvttFees);
         }
-        emit FeesWithdrawn(to, amount);
+
+        if (usdtFees > 0) {
+            collectedFeesUSDT = 0;
+            require(usdt.transfer(to, usdtFees), "Bridge: USDT transfer failed");
+        }
+
+        emit FeesWithdrawn(to, wvttFees, usdtFees);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
