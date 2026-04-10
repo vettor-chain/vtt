@@ -309,6 +309,10 @@ async fn main() {
                     let became_final = finality_tracker.submit_vote(vote);
                     if became_final {
                         info!(block_number, "block finalized");
+                        // Persist finalized block number into chain state
+                        if let Ok(mut chain_w) = chain.write() {
+                            chain_w.set_finalized_block(block_number);
+                        }
                     }
 
                     // Broadcast finality vote
@@ -431,6 +435,7 @@ fn handle_network_message(
                     let became_final = finality_tracker.submit_vote(vote);
                     if became_final {
                         info!(block_number = result.block_number, "block finalized");
+                        chain.set_finalized_block(result.block_number);
                     }
                 }
                 Err(e) => {
@@ -598,6 +603,10 @@ fn handle_network_message(
             let became_final = finality_tracker.submit_vote(vote);
             if became_final {
                 info!(block_number, "block finalized via peer votes");
+                // Persist finalized block number
+                if let Ok(mut chain_w) = chain.write() {
+                    chain_w.set_finalized_block(block_number);
+                }
             }
             vec![]
         }
