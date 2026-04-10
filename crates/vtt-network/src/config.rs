@@ -12,6 +12,10 @@ pub struct NetworkConfig {
     pub boot_nodes: Vec<String>,
     /// Maximum number of peers.
     pub max_peers: usize,
+    /// Maximum number of connections allowed from a single IP address.
+    pub max_peers_per_ip: u32,
+    /// Duration in seconds for which a misbehaving peer is banned.
+    pub ban_duration_secs: u64,
     /// Chain ID this node is operating on.
     pub chain_id: ChainId,
 }
@@ -22,6 +26,8 @@ impl Default for NetworkConfig {
             listen_address: "/ip4/0.0.0.0/tcp/30333".to_string(),
             boot_nodes: Vec::new(),
             max_peers: 50,
+            max_peers_per_ip: 3,
+            ban_duration_secs: 3600,
             chain_id: ChainId::RELAY,
         }
     }
@@ -39,6 +45,8 @@ impl NetworkConfig {
             listen_address: format!("/ip4/127.0.0.1/tcp/{port}"),
             boot_nodes: Vec::new(),
             max_peers: 10,
+            max_peers_per_ip: 3,
+            ban_duration_secs: 3600,
             chain_id: ChainId::RELAY,
         }
     }
@@ -52,6 +60,8 @@ mod tests {
     fn default_config() {
         let config = NetworkConfig::default();
         assert_eq!(config.max_peers, 50);
+        assert_eq!(config.max_peers_per_ip, 3);
+        assert_eq!(config.ban_duration_secs, 3600);
         assert!(config.boot_nodes.is_empty());
     }
 
@@ -60,6 +70,8 @@ mod tests {
         let config = NetworkConfig::dev(30333);
         assert!(config.listen_address.contains("30333"));
         assert_eq!(config.max_peers, 10);
+        assert_eq!(config.max_peers_per_ip, 3);
+        assert_eq!(config.ban_duration_secs, 3600);
     }
 
     #[test]
