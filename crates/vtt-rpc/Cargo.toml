@@ -21,6 +21,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 borsh = { workspace = true }
 hex = "0.4"
+hyper = "1"
+tower = { workspace = true }
+tower-http = { workspace = true }
 vtt-consensus = { workspace = true }
 
 [dev-dependencies]

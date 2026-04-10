@@ -52,6 +52,8 @@ libp2p = { version = "0.54", features = ["tcp", "noise", "yamux", "gossipsub", "
 
 # RPC
 jsonrpsee = { version = "0.24", features = ["server", "client", "macros", "http-client"] }
+tower = "0.4"
+tower-http = { version = "0.6", features = ["cors", "limit"] }
 
 # Telemetry
 tracing = "0.1"
