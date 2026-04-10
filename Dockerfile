@@ -50,4 +50,9 @@ EXPOSE 9944
 # P2P port
 EXPOSE 30333
 
+HEALTHCHECK --interval=10s --timeout=5s --retries=10 --start-period=15s \
+  CMD curl -sf -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"vtt_chainStatus","params":[]}' \
+  http://localhost:9944 || exit 1
+
 ENTRYPOINT ["vtt-validator"]
