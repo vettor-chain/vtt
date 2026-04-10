@@ -218,6 +218,7 @@ fn governance_lifecycle() {
 
     // Create proposal
     let proposer = Address::from([0x01; 20]);
+    let total_staked = Amount::from_vtt(1_000_000);
     let id = gov.create_proposal(
         proposer,
         ProposalAction::TreasurySpend {
@@ -226,10 +227,15 @@ fn governance_lifecycle() {
         },
         "Fund ecosystem development".to_string(),
         1000,
+        total_staked,
     );
 
+    // Verify snapshot fields
+    let p = gov.get(&id).unwrap();
+    assert_eq!(p.snapshot_block, 1000);
+    assert_eq!(p.total_staked_at_creation, total_staked);
+
     // Multiple validators vote
-    let total_staked = Amount::from_vtt(1_000_000);
     gov.vote(
         &id,
         Address::from([0x10; 20]),
@@ -261,7 +267,7 @@ fn governance_lifecycle() {
         .unwrap();
     assert_eq!(status, ProposalStatus::Passed);
 
-    // Execute
+    // Execute (mark_executed accepts both Passed and Queued)
     gov.mark_executed(&id).unwrap();
     assert_eq!(gov.get(&id).unwrap().status, ProposalStatus::Executed);
 }

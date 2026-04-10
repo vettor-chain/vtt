@@ -10,7 +10,7 @@ use vtt_consensus::finality::{FinalityTracker, FinalityVote};
 use vtt_consensus::rewards::{calculate_epoch_reward, split_block_reward, split_gas_fees};
 use vtt_consensus::ConsensusEngine;
 use vtt_crypto::{blake3_hash, merkle_root, Keypair};
-use vtt_executor::{execute_block_transactions_at, finalize_governance_proposals};
+use vtt_executor::{execute_block_transactions_at, execute_queued_proposals, finalize_governance_proposals};
 use vtt_genesis::{build_genesis, genesis_hash, GenesisConfig};
 use vtt_network::messages::NetworkMessage;
 use vtt_network::{NetworkConfig, NetworkEvent, NetworkService};
@@ -679,6 +679,12 @@ fn try_produce_block(
     let gov_finalized = finalize_governance_proposals(chain.state_mut(), next_number, total_staked);
     if gov_finalized > 0 {
         info!(count = gov_finalized, "governance proposals auto-finalized");
+    }
+
+    // --- Execute queued governance proposals whose timelock has expired ---
+    let gov_executed = execute_queued_proposals(chain.state_mut(), next_number);
+    if gov_executed > 0 {
+        info!(count = gov_executed, "queued governance proposals executed after timelock");
     }
 
     // --- Block rewards & gas fee distribution ---
