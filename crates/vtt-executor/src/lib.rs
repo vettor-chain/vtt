@@ -1186,6 +1186,12 @@ fn execute_governance_propose(
         ));
     }
 
+    // Compute total staked for vote weight snapshot
+    let total_staked: Amount = state
+        .iter_accounts()
+        .filter_map(|(_, acc)| acc.staking.as_ref())
+        .fold(Amount::ZERO, |sum, s| sum + s.total_stake);
+
     // Create proposal via GovernanceSystem
     let mut gov = GovernanceSystem::new();
 
@@ -1196,6 +1202,7 @@ fn execute_governance_propose(
         action,
         description.to_string(),
         block_number,
+        total_staked,
     );
 
     // Serialize and store the proposal in state
@@ -1345,7 +1352,7 @@ pub fn finalize_governance_proposals(
     current_block: u64,
     total_staked: Amount,
 ) -> u64 {
-    use vtt_consensus::governance::{ProposalStatus, ProposalAction};
+    use vtt_consensus::governance::{ProposalStatus, EXECUTION_DELAY_BLOCKS};
 
     // Collect all proposal IDs and their raw bytes first (to avoid borrow issues)
     let proposals_raw: Vec<(H256, Vec<u8>)> = state
@@ -1378,50 +1385,20 @@ pub fn finalize_governance_proposals(
         let passed = has_quorum && passes_threshold;
 
         if passed {
-            // Execute the proposal action
-            match &proposal.action {
-                ProposalAction::ParameterChange { key, value } => {
-                    // Log the parameter change; full parameter updates require consensus restart
-                    debug!(key, value, ?proposal_id, "governance parameter change passed (logged, requires restart)");
-                }
-                ProposalAction::TreasurySpend { recipient, amount } => {
-                    let treasury_addr = state.get_treasury_address();
-                    let treasury_balance = state.get_balance(&treasury_addr);
-                    if treasury_balance >= *amount {
-                        if let Err(e) = state.transfer(&treasury_addr, recipient, *amount) {
-                            debug!(?proposal_id, error = %e, "treasury spend transfer failed");
-                        } else {
-                            debug!(?proposal_id, %recipient, %amount, "treasury spend executed");
-                        }
-                    } else {
-                        debug!(
-                            ?proposal_id,
-                            ?treasury_balance,
-                            ?amount,
-                            "treasury spend failed: insufficient treasury balance"
-                        );
-                    }
-                }
-                ProposalAction::RegisterChain { name, .. } => {
-                    debug!(?proposal_id, name, "chain registration signal passed");
-                }
-                ProposalAction::ProtocolUpgrade { version, description } => {
-                    debug!(?proposal_id, version, description, "protocol upgrade signal passed");
-                }
-                ProposalAction::DexPause(paused) => {
-                    state.set_dex_paused(*paused);
-                    debug!(?proposal_id, paused, "DEX pause state updated via governance");
-                }
-            }
-
-            // Mark as Executed
+            // Queue the proposal for execution after timelock delay
             let mut updated = proposal.clone();
-            updated.status = ProposalStatus::Executed;
+            let execute_after = current_block + EXECUTION_DELAY_BLOCKS;
+            updated.status = ProposalStatus::Queued { execute_after };
             let updated_bytes = match borsh::to_vec(&updated) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
             state.put_governance_proposal(proposal_id, updated_bytes);
+            debug!(
+                ?proposal_id,
+                execute_after,
+                "governance proposal queued for execution after timelock"
+            );
         } else {
             // Mark as Rejected
             let mut updated = proposal.clone();
@@ -1444,6 +1421,95 @@ pub fn finalize_governance_proposals(
     }
 
     finalized_count
+}
+
+/// Execute governance proposals whose timelock has expired.
+///
+/// Scans all proposals with `Queued { execute_after }` status.
+/// If `current_block >= execute_after`, the proposal action is executed
+/// and the status is set to `Executed`.
+///
+/// Returns the list of executed proposal IDs.
+pub fn execute_queued_proposals(
+    state: &mut StateDB,
+    current_block: u64,
+) -> u64 {
+    use vtt_consensus::governance::{ProposalStatus, ProposalAction};
+
+    let proposals_raw: Vec<(H256, Vec<u8>)> = state
+        .iter_governance_proposals()
+        .map(|(id, data)| (*id, data.clone()))
+        .collect();
+
+    let mut executed_count = 0u64;
+
+    for (proposal_id, proposal_bytes) in proposals_raw {
+        let proposal: Proposal = match borsh::from_slice(&proposal_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!(?proposal_id, error = %e, "skipping corrupt governance proposal");
+                continue;
+            }
+        };
+
+        // Only process Queued proposals whose timelock has expired
+        let execute_after = match &proposal.status {
+            ProposalStatus::Queued { execute_after } => *execute_after,
+            _ => continue,
+        };
+
+        if current_block < execute_after {
+            continue;
+        }
+
+        // Execute the proposal action
+        match &proposal.action {
+            ProposalAction::ParameterChange { key, value } => {
+                debug!(key, value, ?proposal_id, "governance parameter change executed (logged, requires restart)");
+            }
+            ProposalAction::TreasurySpend { recipient, amount } => {
+                let treasury_addr = state.get_treasury_address();
+                let treasury_balance = state.get_balance(&treasury_addr);
+                if treasury_balance >= *amount {
+                    if let Err(e) = state.transfer(&treasury_addr, recipient, *amount) {
+                        debug!(?proposal_id, error = %e, "treasury spend transfer failed");
+                    } else {
+                        debug!(?proposal_id, %recipient, %amount, "treasury spend executed");
+                    }
+                } else {
+                    debug!(
+                        ?proposal_id,
+                        ?treasury_balance,
+                        ?amount,
+                        "treasury spend failed: insufficient treasury balance"
+                    );
+                }
+            }
+            ProposalAction::RegisterChain { name, .. } => {
+                debug!(?proposal_id, name, "chain registration signal executed");
+            }
+            ProposalAction::ProtocolUpgrade { version, description } => {
+                debug!(?proposal_id, version, description, "protocol upgrade signal executed");
+            }
+            ProposalAction::DexPause(paused) => {
+                state.set_dex_paused(*paused);
+                debug!(?proposal_id, paused, "DEX pause state updated via governance");
+            }
+        }
+
+        // Mark as Executed
+        let mut updated = proposal.clone();
+        updated.status = ProposalStatus::Executed;
+        let updated_bytes = match borsh::to_vec(&updated) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        state.put_governance_proposal(proposal_id, updated_bytes);
+        executed_count += 1;
+        debug!(?proposal_id, "queued governance proposal executed after timelock");
+    }
+
+    executed_count
 }
 
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {

@@ -12,6 +12,8 @@ pub const VOTING_PERIOD_BLOCKS: u64 = 201_600;
 pub const QUORUM_BPS: u64 = 3300;
 /// Pass threshold: 50% + 1 of votes cast.
 pub const PASS_THRESHOLD_BPS: u64 = 5001;
+/// Execution delay in blocks (~24 hours at 3s/block).
+pub const EXECUTION_DELAY_BLOCKS: u64 = 28_800;
 
 /// Types of governance proposals.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -35,6 +37,8 @@ pub enum ProposalStatus {
     Active,
     /// Passed quorum and threshold — ready to execute.
     Passed,
+    /// Queued for execution after timelock expires.
+    Queued { execute_after: u64 },
     /// Failed to reach quorum or threshold.
     Rejected,
     /// Executed on-chain.
@@ -56,6 +60,10 @@ pub struct Proposal {
     pub votes_abstain: Amount,
     /// Who has voted (to prevent double voting).
     pub voters: Vec<Address>,
+    /// Block at which vote weights are captured for snapshot.
+    pub snapshot_block: BlockNumber,
+    /// Total staked amount at proposal creation, used for quorum calculation.
+    pub total_staked_at_creation: Amount,
 }
 
 impl Proposal {
@@ -69,13 +77,20 @@ impl Proposal {
         self.votes_yes + self.votes_no + self.votes_abstain
     }
 
-    /// Check if quorum is reached.
+    /// Check if quorum is reached using the snapshot of total staked at proposal creation.
+    /// Falls back to the provided `total_staked` if `total_staked_at_creation` is zero
+    /// (for backwards compatibility with proposals created before the snapshot feature).
     pub fn has_quorum(&self, total_staked: Amount) -> bool {
-        if total_staked.is_zero() {
+        let effective_total = if !self.total_staked_at_creation.is_zero() {
+            self.total_staked_at_creation
+        } else {
+            total_staked
+        };
+        if effective_total.is_zero() {
             return false;
         }
-        // quorum = total_votes / total_staked >= QUORUM_BPS / 10000
-        self.total_votes().raw() * 10_000 >= total_staked.raw() * QUORUM_BPS as u128
+        // quorum = total_votes / effective_total >= QUORUM_BPS / 10000
+        self.total_votes().raw() * 10_000 >= effective_total.raw() * QUORUM_BPS as u128
     }
 
     /// Check if the proposal passes the threshold.
@@ -109,12 +124,14 @@ impl GovernanceSystem {
     }
 
     /// Create a new proposal. Returns the proposal ID.
+    /// `total_staked` is the current total staked amount, captured as a snapshot for quorum.
     pub fn create_proposal(
         &mut self,
         proposer: Address,
         action: ProposalAction,
         description: String,
         current_block: BlockNumber,
+        total_staked: Amount,
     ) -> H256 {
         let id_data = borsh::to_vec(&(self.next_id, &proposer, current_block)).unwrap();
         let id = vtt_crypto::blake3_hash(&id_data);
@@ -132,6 +149,8 @@ impl GovernanceSystem {
             votes_no: Amount::ZERO,
             votes_abstain: Amount::ZERO,
             voters: Vec::new(),
+            snapshot_block: current_block,
+            total_staked_at_creation: total_staked,
         };
 
         self.proposals.insert(id, proposal);
@@ -208,15 +227,16 @@ impl GovernanceSystem {
         Ok(status)
     }
 
-    /// Mark a passed proposal as executed.
+    /// Mark a passed or queued proposal as executed.
     pub fn mark_executed(&mut self, proposal_id: &H256) -> Result<(), GovernanceError> {
         let proposal = self
             .proposals
             .get_mut(proposal_id)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
-        if proposal.status != ProposalStatus::Passed {
-            return Err(GovernanceError::NotPassed);
+        match &proposal.status {
+            ProposalStatus::Passed | ProposalStatus::Queued { .. } => {}
+            _ => return Err(GovernanceError::NotPassed),
         }
 
         proposal.status = ProposalStatus::Executed;
@@ -288,6 +308,7 @@ mod tests {
             },
             "Reduce block time to 2s".to_string(),
             100,
+            Amount::from_vtt(1_000_000),
         );
         (gov, id)
     }
@@ -468,6 +489,7 @@ mod tests {
             },
             "Fund ecosystem grant".to_string(),
             0,
+            Amount::from_vtt(1_000_000),
         );
         assert!(gov.get(&id).is_some());
     }
@@ -483,6 +505,7 @@ mod tests {
             },
             "Upgrade".to_string(),
             0,
+            Amount::from_vtt(1_000_000),
         );
         gov.create_proposal(
             Address::ZERO,
@@ -492,6 +515,7 @@ mod tests {
             },
             "Increase gas".to_string(),
             0,
+            Amount::from_vtt(1_000_000),
         );
         assert_eq!(gov.active_proposals().len(), 2);
         assert_eq!(gov.proposal_count(), 2);

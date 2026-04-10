@@ -926,6 +926,7 @@ fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo
     let status = match &p.status {
         ProposalStatus::Active => "active",
         ProposalStatus::Passed => "passed",
+        ProposalStatus::Queued { .. } => "queued",
         ProposalStatus::Rejected => "rejected",
         ProposalStatus::Executed => "executed",
     }
