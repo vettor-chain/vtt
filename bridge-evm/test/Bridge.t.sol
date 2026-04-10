@@ -164,7 +164,8 @@ contract BridgeTest is Test {
         bridge.depositUSDT(10000e6, vttDest);
 
         // 0.1% of 10000 = 10 USDT
-        assertEq(bridge.collectedFees(), 10e6);
+        assertEq(bridge.collectedFeesUSDT(), 10e6);
+        assertEq(bridge.collectedFeesWVTT(), 0);
     }
 
     // ─── Admin ───
@@ -182,5 +183,117 @@ contract BridgeTest is Test {
     function test_set_relayer() public {
         bridge.setRelayer(address(0x1234));
         assertEq(bridge.relayer(), address(0x1234));
+    }
+
+    // ─── Pause mechanism (Task 13) ───
+
+    function test_pause_blocks_deposit() public {
+        usdt.mint(user, 5000e6);
+        vm.prank(user);
+        usdt.approve(address(bridge), 5000e6);
+
+        bridge.pause();
+
+        vm.prank(user);
+        vm.expectRevert("Bridge: paused");
+        bridge.depositUSDT(5000e6, vttDest);
+    }
+
+    function test_unpause_allows_deposit() public {
+        usdt.mint(user, 5000e6);
+        vm.prank(user);
+        usdt.approve(address(bridge), 5000e6);
+
+        bridge.pause();
+        bridge.unpause();
+
+        vm.prank(user);
+        bridge.depositUSDT(5000e6, vttDest);
+
+        assertEq(usdt.balanceOf(user), 0);
+        assertEq(bridge.depositNonce(), 1);
+    }
+
+    function test_pause_only_owner() public {
+        address alice = address(0xAAAA);
+        vm.prank(alice);
+        vm.expectRevert("Bridge: not owner");
+        bridge.pause();
+    }
+
+    function test_pause_blocks_release() public {
+        bridge.pause();
+
+        vm.prank(relayer);
+        vm.expectRevert("Bridge: paused");
+        bridge.releaseWVTT(keccak256("tx-pause"), user, 100 ether);
+    }
+
+    // ─── Fee withdrawal fix (Task 15) ───
+
+    function test_withdraw_wvtt_fees() public {
+        // Mint wVTT to user and deposit to generate wVTT fees
+        vm.prank(address(bridge));
+        wvtt.mint(user, 10000 ether);
+
+        vm.prank(user);
+        bridge.depositWVTT(10000 ether, vttDest);
+
+        // 0.1% of 10000 = 10 wVTT fee
+        assertEq(bridge.collectedFeesWVTT(), 10 ether);
+        assertEq(bridge.collectedFeesUSDT(), 0);
+
+        address feeRecipient = address(0xFEE1);
+        bridge.withdrawFees(feeRecipient);
+
+        // wVTT fees are minted to recipient
+        assertEq(wvtt.balanceOf(feeRecipient), 10 ether);
+        assertEq(bridge.collectedFeesWVTT(), 0);
+    }
+
+    function test_withdraw_usdt_fees() public {
+        usdt.mint(user, 10000e6);
+        vm.prank(user);
+        usdt.approve(address(bridge), 10000e6);
+
+        vm.prank(user);
+        bridge.depositUSDT(10000e6, vttDest);
+
+        // 0.1% of 10000 = 10 USDT fee
+        assertEq(bridge.collectedFeesUSDT(), 10e6);
+        assertEq(bridge.collectedFeesWVTT(), 0);
+
+        address feeRecipient = address(0xFEE2);
+        bridge.withdrawFees(feeRecipient);
+
+        assertEq(usdt.balanceOf(feeRecipient), 10e6);
+        assertEq(bridge.collectedFeesUSDT(), 0);
+    }
+
+    function test_withdraw_mixed_fees() public {
+        // Generate wVTT fees
+        vm.prank(address(bridge));
+        wvtt.mint(user, 10000 ether);
+        vm.prank(user);
+        bridge.depositWVTT(10000 ether, vttDest);
+
+        // Generate USDT fees
+        usdt.mint(user, 10000e6);
+        vm.prank(user);
+        usdt.approve(address(bridge), 10000e6);
+        vm.prank(user);
+        bridge.depositUSDT(10000e6, vttDest);
+
+        assertEq(bridge.collectedFeesWVTT(), 10 ether);
+        assertEq(bridge.collectedFeesUSDT(), 10e6);
+
+        address feeRecipient = address(0xFEE3);
+        bridge.withdrawFees(feeRecipient);
+
+        // Verify both fee types withdrawn correctly
+        assertEq(wvtt.balanceOf(feeRecipient), 10 ether);
+        assertEq(usdt.balanceOf(feeRecipient), 10e6);
+        assertEq(bridge.collectedFeesWVTT(), 0);
+        assertEq(bridge.collectedFeesUSDT(), 0);
     }
 }
