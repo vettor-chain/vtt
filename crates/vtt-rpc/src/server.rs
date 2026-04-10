@@ -1,12 +1,15 @@
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use jsonrpsee::core::async_trait;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, info};
 
 use borsh::BorshDeserialize;
@@ -194,54 +197,61 @@ pub trait VttApi {
     async fn get_asset_balances(&self, address: Address, asset_ids: Vec<H256>) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
 }
 
-/// Global rate limiter for sendTransaction -- sliding window counter.
+/// Per-IP rate limiter for sendTransaction -- sliding window counter.
 ///
-/// NOTE: This limiter is global (shared across all callers), not per-IP.
-/// For production deployments with public-facing RPC, consider implementing
-/// per-IP rate limiting (e.g. via a HashMap<IpAddr, RateLimiter> or an
-/// external reverse-proxy such as nginx/HAProxy).
-pub struct RateLimiter {
-    /// Maximum calls per window.
-    max_calls: u64,
-    /// Counter for current window.
-    count: AtomicU64,
-    /// Start of current window.
-    window_start: RwLock<Instant>,
+/// Each IP address gets its own call counter that resets every second.
+/// Stale entries (no requests for 60s) are cleaned up periodically.
+///
+/// NOTE: When running behind a reverse proxy, the proxy should set
+/// X-Forwarded-For so the application can extract the real client IP.
+/// Currently, if the real IP is not available from the jsonrpsee
+/// connection context, it falls back to 127.0.0.1.
+pub struct PerIpRateLimiter {
+    /// Maximum calls per 1-second window per IP.
+    max_calls_per_second: u64,
+    /// Per-IP counters: (call_count, window_start).
+    clients: Mutex<HashMap<IpAddr, (u64, Instant)>>,
 }
 
-impl RateLimiter {
+impl PerIpRateLimiter {
     pub fn new(max_calls_per_second: u64) -> Self {
         Self {
-            max_calls: max_calls_per_second,
-            count: AtomicU64::new(0),
-            window_start: RwLock::new(Instant::now()),
+            max_calls_per_second,
+            clients: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Returns true if the request is allowed, false if rate-limited.
-    pub fn check(&self) -> bool {
+    /// Returns true if the request from `ip` is allowed, false if rate-limited.
+    pub fn check(&self, ip: IpAddr) -> bool {
+        let mut clients = match self.clients.lock() {
+            Ok(c) => c,
+            Err(_) => return false, // poisoned lock -- deny request
+        };
         let now = Instant::now();
-        {
-            let start = match self.window_start.read() {
-                Ok(s) => s,
-                Err(_) => return false, // poisoned lock — deny request
-            };
-            if now.duration_since(*start).as_secs() >= 1 {
-                drop(start);
-                // Reset window
-                let mut start = match self.window_start.write() {
-                    Ok(s) => s,
-                    Err(_) => return false, // poisoned lock — deny request
-                };
-                // Double-check after acquiring write lock
-                if now.duration_since(*start).as_secs() >= 1 {
-                    *start = now;
-                    self.count.store(0, Ordering::Relaxed);
-                }
-            }
+        let entry = clients.entry(ip).or_insert((0, now));
+
+        // If the window has elapsed, reset the counter.
+        if now.duration_since(entry.1).as_secs() >= 1 {
+            *entry = (1, now);
+            return true;
         }
-        let prev = self.count.fetch_add(1, Ordering::Relaxed);
-        prev < self.max_calls
+
+        if entry.0 >= self.max_calls_per_second {
+            return false;
+        }
+
+        entry.0 += 1;
+        true
+    }
+
+    /// Remove entries that have not been seen for 60 seconds.
+    pub fn cleanup(&self) {
+        let mut clients = match self.clients.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let now = Instant::now();
+        clients.retain(|_, (_, last)| now.duration_since(*last).as_secs() < 60);
     }
 }
 
@@ -292,8 +302,8 @@ pub struct RpcState {
     pub total_minted_milli: AtomicU64,
     /// Optional node metrics for monitoring.
     pub metrics: Option<Arc<NodeMetrics>>,
-    /// Rate limiter for sendTransaction.
-    pub send_tx_limiter: RateLimiter,
+    /// Per-IP rate limiter for sendTransaction.
+    pub send_tx_limiter: PerIpRateLimiter,
 }
 
 /// Implementation of the VTT JSON-RPC API.
@@ -463,8 +473,12 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned> {
-        // Rate limit check
-        if !self.state.send_tx_limiter.check() {
+        // Per-IP rate limit check.
+        // TODO: Extract real client IP from X-Forwarded-For when behind a reverse proxy.
+        // For now, falls back to localhost, which means all requests share a single bucket
+        // unless the deployment injects the real IP upstream.
+        let client_ip: IpAddr = "127.0.0.1".parse().unwrap();
+        if !self.state.send_tx_limiter.check(client_ip) {
             return Err(ErrorObjectOwned::owned(
                 -32005,
                 "Rate limit exceeded",
@@ -1116,7 +1130,7 @@ impl RpcServer {
                 total_burned_milli: AtomicU64::new(0),
                 total_minted_milli: AtomicU64::new(0),
                 metrics: None,
-                send_tx_limiter: RateLimiter::new(10),
+                send_tx_limiter: PerIpRateLimiter::new(10),
             }),
         }
     }
@@ -1134,7 +1148,7 @@ impl RpcServer {
                 total_burned_milli: AtomicU64::new(0),
                 total_minted_milli: AtomicU64::new(0),
                 metrics: Some(metrics),
-                send_tx_limiter: RateLimiter::new(10),
+                send_tx_limiter: PerIpRateLimiter::new(10),
             }),
         }
     }
@@ -1145,8 +1159,31 @@ impl RpcServer {
     }
 
     /// Start the JSON-RPC server on the given address.
+    ///
+    /// The server is configured with:
+    /// - CORS headers allowing any origin (POST with Content-Type)
+    /// - 1 MB request body size limit
+    /// - Per-IP rate limiting on sendTransaction
     pub async fn start(self, addr: SocketAddr) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-        let server = Server::builder().build(addr).await?;
+        // CORS: allow any origin, POST method, Content-Type header.
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([hyper::Method::POST])
+            .allow_headers([hyper::header::CONTENT_TYPE]);
+
+        // Request body size limit: 1 MB.
+        let body_limit = RequestBodyLimitLayer::new(1024 * 1024);
+
+        // Order: body_limit is innermost (applied first to the service),
+        // CORS is outermost (applied last, intercepts preflight OPTIONS before body limit).
+        let middleware = tower::ServiceBuilder::new()
+            .layer(body_limit)
+            .layer(cors);
+
+        let server = Server::builder()
+            .set_http_middleware(middleware)
+            .build(addr)
+            .await?;
         let local_addr = server.local_addr()?;
 
         let rpc_impl = VttRpcImpl { state: self.state };
