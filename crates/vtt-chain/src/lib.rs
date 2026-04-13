@@ -353,6 +353,14 @@ impl Chain {
     }
 }
 
+// Helper methods for tests and external use
+impl Chain {
+    /// Get the balance of an address from the current state.
+    pub fn get_balance_of(&self, address: &Address) -> Amount {
+        self.state.get_balance(address)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,7 +584,7 @@ mod tests {
 
     #[test]
     fn import_block_with_transaction() {
-        let (mut chain, genesis_hash, val_addr) = setup_chain();
+        let (mut chain, _genesis_hash, _val_addr) = setup_chain();
 
         let alice_kp = Keypair::from_seed(&[0x01; 32]);
         let alice_addr = alice_kp.address();
@@ -613,7 +621,7 @@ mod tests {
         // Execute the transaction to get the resulting state root
         let (receipts_pre, gas_used) = execute_block_transactions_at(
             chain.state_mut(),
-            &[tx.clone()],
+            std::slice::from_ref(&tx),
             &GasConfig::default(),
             10_000_000,
             0,
@@ -705,13 +713,5 @@ mod tests {
             }
             other => panic!("expected RevertsPastFinalized, got {:?}", other),
         }
-    }
-}
-
-// Helper methods for tests and external use
-impl Chain {
-    /// Get the balance of an address from the current state.
-    pub fn get_balance_of(&self, address: &Address) -> Amount {
-        self.state.get_balance(address)
     }
 }

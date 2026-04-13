@@ -591,10 +591,7 @@ impl VttApiServer for VttRpcImpl {
 
             if pool.token_a == token_id && vtt_dex::PoolState::is_native(&pool.token_b) && ra > 0 {
                 // price = reserve_b / reserve_a, scaled to 18 decimals
-                let price = (rb as u128)
-                    .checked_mul(10u128.pow(18))
-                    .unwrap_or(u128::MAX)
-                    / ra;
+                let price = rb.saturating_mul(10u128.pow(18)) / ra;
                 return Ok(Some(TokenPriceRpc {
                     token_id,
                     price_in_vtt: price.to_string(),
@@ -603,10 +600,7 @@ impl VttApiServer for VttRpcImpl {
             }
             if pool.token_b == token_id && vtt_dex::PoolState::is_native(&pool.token_a) && rb > 0 {
                 // price = reserve_a / reserve_b, scaled to 18 decimals
-                let price = (ra as u128)
-                    .checked_mul(10u128.pow(18))
-                    .unwrap_or(u128::MAX)
-                    / rb;
+                let price = ra.saturating_mul(10u128.pow(18)) / rb;
                 return Ok(Some(TokenPriceRpc {
                     token_id,
                     price_in_vtt: price.to_string(),
@@ -630,14 +624,14 @@ impl VttApiServer for VttRpcImpl {
 
             // price_a_in_b = reserve_b / reserve_a, scaled to 18 decimals
             let price_a_in_b = if ra > 0 {
-                rb.checked_mul(10u128.pow(18)).unwrap_or(u128::MAX) / ra
+                rb.saturating_mul(10u128.pow(18)) / ra
             } else {
                 0
             };
 
             // price_b_in_a = reserve_a / reserve_b, scaled to 18 decimals
             let price_b_in_a = if rb > 0 {
-                ra.checked_mul(10u128.pow(18)).unwrap_or(u128::MAX) / rb
+                ra.saturating_mul(10u128.pow(18)) / rb
             } else {
                 0
             };

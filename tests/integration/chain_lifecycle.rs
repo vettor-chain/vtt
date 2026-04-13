@@ -88,7 +88,7 @@ fn full_chain_lifecycle() {
     );
 
     let (receipts, gas_used) =
-        execute_block_transactions(chain.state_mut(), &[tx.clone()], &gas_config, 10_000_000);
+        execute_block_transactions(chain.state_mut(), std::slice::from_ref(&tx), &gas_config, 10_000_000);
     assert!(receipts[0].success);
 
     let state_root = chain.state_mut().compute_state_root();
@@ -290,7 +290,7 @@ fn cross_chain_messaging_flow() {
                 CrossChainPayload::VttTransfer {
                     amount: Amount::from_vtt(100 * (i + 1)),
                 },
-                i as u64,
+                i,
             )
             .unwrap();
     }

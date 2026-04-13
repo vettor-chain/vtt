@@ -77,7 +77,7 @@ async fn main() {
         .unwrap_or_else(|| {
             // In dev mode (no genesis file provided = dev_default with chain_id 0), allow hardcoded seed
             // For production (genesis file supplied), panic to prevent running with insecure default
-            let is_dev = args.iter().position(|a| a == "--genesis").is_none();
+            let is_dev = !args.iter().any(|a| a == "--genesis");
             if is_dev {
                 warn!("no seed provided — using dev default (NOT SAFE FOR PRODUCTION)");
                 [0x10; 32]
