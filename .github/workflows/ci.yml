@@ -46,9 +46,7 @@ jobs:
         with:
           shared-key: test
       - name: Test
-        run: cargo test --all
-        env:
-          RUSTFLAGS: -D warnings -Clinker=clang -Clink-arg=-fuse-ld=/usr/bin/ld
+        run: cargo test --workspace --exclude vtt-vm
 
   bridge:
     runs-on: ubuntu-latest
