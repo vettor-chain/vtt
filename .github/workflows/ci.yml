@@ -46,7 +46,20 @@ jobs:
         with:
           shared-key: test
       - name: Test
-        run: cargo test --workspace --exclude vtt-vm --exclude vtt-integration-tests
+        run: >
+          cargo test
+          -p vtt-compliance
+          -p vtt-consensus
+          -p vtt-crypto
+          -p vtt-dex
+          -p vtt-genesis
+          -p vtt-multichain
+          -p vtt-network
+          -p vtt-primitives
+          -p vtt-state
+          -p vtt-storage
+          -p vtt-telemetry
+          -p vtt-txpool
 
   bridge:
     runs-on: ubuntu-latest
