@@ -14,21 +14,37 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  check:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-
+          components: rustfmt
       - name: Format
         run: cargo fmt --all -- --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
       - name: Test
         run: cargo test --all
 
@@ -39,13 +55,12 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
-
       - name: Forge test
         working-directory: bridge-evm
         run: forge test -v
 
   docker:
-    needs: [check, bridge]
+    needs: [fmt, clippy, test, bridge]
     if: github.event_name == 'push' || github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
