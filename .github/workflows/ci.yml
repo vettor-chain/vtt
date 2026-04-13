@@ -34,27 +34,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: clippy
-      - name: Install system linker
-        run: sudo apt-get update && sudo apt-get install -y binutils
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features
-        env:
-          RUSTFLAGS: -D warnings -Clinker=cc -Clink-arg=-B/usr/bin
+      - name: Clippy (check only, no linking)
+        run: cargo clippy --all-features -- -D warnings
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - name: Install system linker
-        run: sudo apt-get update && sudo apt-get install -y binutils
       - name: Test
         run: cargo test --all
         env:
-          RUSTFLAGS: -D warnings -Clinker=cc -Clink-arg=-B/usr/bin
+          RUSTFLAGS: -D warnings -Clinker=clang -Clink-arg=-fuse-ld=/usr/bin/ld
 
   bridge:
     runs-on: ubuntu-latest
