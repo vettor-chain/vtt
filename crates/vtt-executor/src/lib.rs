@@ -733,6 +733,7 @@ fn execute_deploy_contract(
 }
 
 /// Execute a contract call.
+#[allow(clippy::too_many_arguments)]
 fn execute_call_contract(
     state: &mut StateDB,
     sender: &Address,

@@ -87,8 +87,12 @@ fn full_chain_lifecycle() {
         },
     );
 
-    let (receipts, gas_used) =
-        execute_block_transactions(chain.state_mut(), std::slice::from_ref(&tx), &gas_config, 10_000_000);
+    let (receipts, gas_used) = execute_block_transactions(
+        chain.state_mut(),
+        std::slice::from_ref(&tx),
+        &gas_config,
+        10_000_000,
+    );
     assert!(receipts[0].success);
 
     let state_root = chain.state_mut().compute_state_root();
