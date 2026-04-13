@@ -227,7 +227,7 @@ impl NetworkService {
     pub fn is_banned(&self, peer_id: &PeerId) -> bool {
         self.reputations
             .get(peer_id)
-            .map(|r| r.banned_until.map_or(false, |t| Instant::now() < t))
+            .map(|r| r.banned_until.is_some_and(|t| Instant::now() < t))
             .unwrap_or(false)
     }
 
@@ -252,7 +252,7 @@ impl NetworkService {
         let now = Instant::now();
         self.reputations.retain(|_, r| {
             // Keep entries that are still banned OR still have a positive score
-            r.banned_until.map_or(true, |t| now < t) || r.score > 0
+            r.banned_until.is_none_or(|t| now < t) || r.score > 0
         });
     }
 
