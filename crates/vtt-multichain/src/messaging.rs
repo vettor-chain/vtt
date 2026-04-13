@@ -384,7 +384,7 @@ mod tests {
         let mut inbox = MessageInbox::new(ChainId::new(2));
 
         // Send from chain 1
-        let msg = outbox
+        let _msg = outbox
             .send(
                 ChainId::new(2),
                 Address::from([0x01; 20]),
