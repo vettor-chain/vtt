@@ -10,7 +10,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings -Clink-self-contained=no
+  RUSTFLAGS: -D warnings
   REGISTRY: ghcr.io
 
 jobs:
@@ -34,8 +34,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: clippy
+      - name: Install system linker
+        run: sudo apt-get update && sudo apt-get install -y binutils
       - name: Clippy
         run: cargo clippy --all-targets --all-features
+        env:
+          RUSTFLAGS: -D warnings -Clinker=cc -Clink-arg=-B/usr/bin
 
   test:
     runs-on: ubuntu-latest
@@ -45,8 +49,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
+      - name: Install system linker
+        run: sudo apt-get update && sudo apt-get install -y binutils
       - name: Test
         run: cargo test --all
+        env:
+          RUSTFLAGS: -D warnings -Clinker=cc -Clink-arg=-B/usr/bin
 
   bridge:
     runs-on: ubuntu-latest
