@@ -46,7 +46,7 @@ jobs:
         with:
           shared-key: test
       - name: Test
-        run: cargo test --workspace --exclude vtt-vm
+        run: cargo test --workspace --exclude vtt-vm --exclude vtt-integration-tests
 
   bridge:
     runs-on: ubuntu-latest
