@@ -53,6 +53,7 @@ vtt-cli genesis --out genesis.json
 The genesis file is a JSON object with the following top-level fields:
 
 - `chain` -- chain parameters (chain_id, consensus config, gas config)
+- `timestamp` -- genesis block timestamp (ISO 8601 or Unix seconds)
 - `validators` -- initial validator set with addresses, stakes, and commission
 - `allocations` -- initial account balances
 
@@ -82,6 +83,7 @@ vtt-validator \
 | `--metrics-port <port>` | 9615 | Prometheus metrics HTTP port. |
 | `--data-dir <path>` | in-memory | Directory for persistent RocksDB storage. |
 | `--bootnodes <addrs>` | none | Comma-separated libp2p multiaddrs of boot nodes. |
+| `--testnet` | off | Use the built-in testnet genesis and bootnodes. Accepted by both `vtt-validator` and `vtt-node`. |
 
 ### Environment Variables
 
@@ -92,7 +94,9 @@ vtt-validator \
 
 ## 6. Running a Non-Validator Node
 
-A full node syncs the chain and serves RPC but does not produce blocks.
+A full node syncs the chain but does not produce blocks.
+
+> **Note:** `vtt-node` does NOT start an RPC server. Only `vtt-validator` exposes the JSON-RPC API on port 9944. If you need RPC access, run `vtt-validator` without a seed (it will sync but not produce blocks) or point your RPC clients at an existing validator.
 
 ```bash
 vtt-node \
@@ -107,7 +111,7 @@ Use `--dev` for local development mode (uses built-in dev genesis).
 
 ## 7. Staking to Register as a Validator
 
-To register as a validator, you must self-stake at least the minimum self-stake amount (configured in genesis consensus params, default 10,000 VTT).
+To register as a validator, you must self-stake at least the minimum self-stake amount (configured in genesis consensus params, default 100,000 VTT).
 
 ```bash
 # Self-stake (validator address = your own address)
@@ -227,3 +231,34 @@ sudo ufw allow from 127.0.0.1 to any port 9944
 # Metrics -- restrict to monitoring server
 sudo ufw allow from <PROMETHEUS_IP> to any port 9615
 ```
+
+## 11. Storage Pruning
+
+RocksDB automatically prunes old block bodies and receipts every 10,000 blocks. The node keeps the most recent 100,000 blocks (~3.5 days at 3s/block). Manual compaction runs after each pruning cycle to reclaim disk space.
+
+## 12. Transaction Pool
+
+- Transactions expire after 1 hour (configurable via `tx_ttl_secs`)
+- Expired transactions are evicted every 60 seconds
+- Max pool size: 10,000 transactions
+- Max per account: 100 pending transactions
+
+## 13. Peer Management
+
+- Maximum 50 connected peers (configurable)
+- Maximum 3 connections per IP address
+- Peer reputation system with automatic banning (1 hour) for misbehavior
+- Messages over 4 MB are rejected and the sender is penalized
+
+## 14. Finality
+
+- BFT finality with 2/3+1 validator threshold
+- Finalized blocks are persisted and cannot be reverted
+- Fork choice rejects any chain that would revert past the finalized block
+
+## 15. RPC Security
+
+- CORS enabled (configurable)
+- Per-IP rate limiting on transaction submission (10/sec default)
+- Request body size limit: 1 MB
+- Response pagination: max 100 items per query

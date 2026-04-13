@@ -294,15 +294,30 @@ Created at genesis or via admin transactions post-genesis:
 
 New methods for the web frontend (added to `vtt-rpc`):
 
+### Implemented
+
 ```
 vtt_getPool(pool_id: H256) → PoolInfo | null
 vtt_listPools() → Vec<PoolInfo>
-vtt_getSwapQuote(pool_id: H256, token_in: H256, amount_in: Amount) → SwapQuote
+vtt_getSwapQuote(pool_id: H256, amount_in: String, a_to_b: bool) → SwapQuoteRpc
+vtt_getTokenPrice(token_id: H256) → TokenPriceRpc | null
+vtt_getPoolPrices() → Vec<PoolPriceRpc>
+```
+
+### Not Implemented
+
+The following endpoints from the original spec are not yet implemented:
+
+```
 vtt_getMiningInfo(pool_id: H256) → MiningInfo
 vtt_getMiningRewards(pool_id: H256, address: Address) → Amount
 vtt_getRevenueInfo(pool_id: H256) → RevenueInfo
 vtt_getRevenueClaimable(address: Address) → RevenueClaimable
 ```
+
+### DEX Pause Mechanism
+
+The DEX can be paused and unpaused via on-chain governance proposals (action types `dex_pause` / `dex_unpause`). When paused, all pool operations (create, add/remove liquidity, swap) are rejected with `DexPaused` error. The pause state is stored in `StateDB` under the `dex:paused` chain metadata key.
 
 ## Integration with Executor
 
