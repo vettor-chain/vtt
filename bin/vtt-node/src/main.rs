@@ -150,7 +150,11 @@ async fn main() {
         None
     };
     let mut chain = if let Some(ref store) = rocks_store {
-        Chain::with_storage(consensus, genesis_config.chain.gas.clone(), store.clone() as Arc<dyn vtt_storage::KeyValueStore>)
+        Chain::with_storage(
+            consensus,
+            genesis_config.chain.gas.clone(),
+            store.clone() as Arc<dyn vtt_storage::KeyValueStore>,
+        )
     } else {
         Chain::new(consensus, genesis_config.chain.gas.clone())
     };
@@ -407,7 +411,9 @@ fn handle_network_message(
         }
 
         // T1: Block sync protocol — Status exchange
-        NetworkMessage::Status { best_block_number, .. } => {
+        NetworkMessage::Status {
+            best_block_number, ..
+        } => {
             let chain_r = match chain.read() {
                 Ok(c) => c,
                 Err(_) => return vec![],
@@ -418,15 +424,29 @@ fn handle_network_message(
                 let from = our_height + 1;
                 let count = ((best_block_number - our_height) as u32).min(SYNC_BATCH_SIZE);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(our_height, peer_height = best_block_number, from, count, "peer is ahead, requesting blocks");
-                vec![NetworkMessage::BlockRangeRequest { request_id, from_number: from, count }]
+                info!(
+                    our_height,
+                    peer_height = best_block_number,
+                    from,
+                    count,
+                    "peer is ahead, requesting blocks"
+                );
+                vec![NetworkMessage::BlockRangeRequest {
+                    request_id,
+                    from_number: from,
+                    count,
+                }]
             } else {
                 vec![]
             }
         }
 
         // T1: Respond to block range requests
-        NetworkMessage::BlockRangeRequest { request_id, from_number, count } => {
+        NetworkMessage::BlockRangeRequest {
+            request_id,
+            from_number,
+            count,
+        } => {
             let chain_r = match chain.read() {
                 Ok(c) => c,
                 Err(_) => return vec![],
@@ -441,7 +461,12 @@ fn handle_network_message(
                     break;
                 }
             }
-            debug!(request_id, from_number, sent = blocks.len(), "responding to block range request");
+            debug!(
+                request_id,
+                from_number,
+                sent = blocks.len(),
+                "responding to block range request"
+            );
             vec![NetworkMessage::BlockRangeResponse { request_id, blocks }]
         }
 
@@ -453,7 +478,13 @@ fn handle_network_message(
             }
             let first = blocks[0].header.number;
             let last = blocks[blocks.len() - 1].header.number;
-            info!(request_id, first, last, count = blocks.len(), "received block range response");
+            info!(
+                request_id,
+                first,
+                last,
+                count = blocks.len(),
+                "received block range response"
+            );
 
             let mut chain = match chain.write() {
                 Ok(c) => c,

@@ -149,10 +149,7 @@ mod tests {
             votes_yes: Amount::from_vtt(100_000),
             votes_no: Amount::from_vtt(20_000),
             votes_abstain: Amount::from_vtt(5_000),
-            voters: vec![
-                Address::from([0x10; 20]),
-                Address::from([0x20; 20]),
-            ],
+            voters: vec![Address::from([0x10; 20]), Address::from([0x20; 20])],
         };
         let bytes = borsh::to_vec(&proposal).unwrap();
         let proposal2 = AssetProposal::try_from_slice(&bytes).unwrap();

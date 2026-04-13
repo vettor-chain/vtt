@@ -70,7 +70,8 @@ impl MiningState {
                 let delta = U256::mul_u128(reward, PRECISION)
                     .div_u128(lp_total_supply)
                     .unwrap_or(0);
-                self.reward_per_lp_accumulated = self.reward_per_lp_accumulated.saturating_add(delta);
+                self.reward_per_lp_accumulated =
+                    self.reward_per_lp_accumulated.saturating_add(delta);
             }
         }
         self.last_update_epoch = current_epoch;
@@ -97,10 +98,13 @@ impl MiningState {
             .div_u128(PRECISION)
             .unwrap_or(0);
 
-        self.claims.insert(key, MiningClaim {
-            reward_debt: new_debt,
-            unclaimed: 0,
-        });
+        self.claims.insert(
+            key,
+            MiningClaim {
+                reward_debt: new_debt,
+                unclaimed: 0,
+            },
+        );
 
         self.total_distributed = Amount::from_raw(self.total_distributed.0.saturating_add(pending));
         pending

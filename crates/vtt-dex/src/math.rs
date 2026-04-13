@@ -29,8 +29,7 @@ impl U256 {
 
         let mid = lh + hl;
         let lo = ll.wrapping_add(mid << 64);
-        let carry = if lo < ll { 1u128 } else { 0 }
-            + if mid < lh { 1u128 << 64 } else { 0 };
+        let carry = if lo < ll { 1u128 } else { 0 } + if mid < lh { 1u128 << 64 } else { 0 };
         let hi = hh + (mid >> 64) + carry;
 
         Self { hi, lo }
@@ -221,20 +220,32 @@ mod tests {
     fn test_calculate_fees() {
         // 10000 input, 0.3% fee, 0.05% protocol
         let (net, lp_fee, protocol_fee) = calculate_fees(10000, 30, 5).unwrap();
-        assert_eq!(protocol_fee, 5);   // 10000 * 5 / 10000
-        assert_eq!(lp_fee, 25);        // 30 - 5
-        assert_eq!(net, 9970);         // 10000 - 30
+        assert_eq!(protocol_fee, 5); // 10000 * 5 / 10000
+        assert_eq!(lp_fee, 25); // 30 - 5
+        assert_eq!(net, 9970); // 10000 - 30
     }
 
     #[test]
     fn test_zero_amount() {
-        assert!(matches!(get_amount_out(0, 1000, 2000), Err(DexError::ZeroAmount)));
-        assert!(matches!(calculate_fees(0, 30, 5), Err(DexError::ZeroAmount)));
+        assert!(matches!(
+            get_amount_out(0, 1000, 2000),
+            Err(DexError::ZeroAmount)
+        ));
+        assert!(matches!(
+            calculate_fees(0, 30, 5),
+            Err(DexError::ZeroAmount)
+        ));
     }
 
     #[test]
     fn test_zero_reserves() {
-        assert!(matches!(get_amount_out(100, 0, 2000), Err(DexError::ZeroLiquidity)));
-        assert!(matches!(get_amount_out(100, 1000, 0), Err(DexError::ZeroLiquidity)));
+        assert!(matches!(
+            get_amount_out(100, 0, 2000),
+            Err(DexError::ZeroLiquidity)
+        ));
+        assert!(matches!(
+            get_amount_out(100, 1000, 0),
+            Err(DexError::ZeroLiquidity)
+        ));
     }
 }

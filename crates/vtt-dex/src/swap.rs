@@ -56,7 +56,11 @@ pub fn execute_swap(
     transfer_token_in(state, sender, token_in, amount_in)?;
 
     // Transfer output to sender
-    let token_out = if is_a_to_b { &pool.token_b } else { &pool.token_a };
+    let token_out = if is_a_to_b {
+        &pool.token_b
+    } else {
+        &pool.token_a
+    };
     let out = Amount::from_raw(amount_out);
     transfer_token_out(state, sender, token_out, out)?;
 
@@ -130,8 +134,18 @@ mod tests {
         let trader = make_address(20);
 
         // Provide liquidity: 1000 A, 2000 B
-        setup_asset(&mut state, token_a, liquidity_provider, Amount::from_raw(1_000_000));
-        setup_asset(&mut state, token_b, liquidity_provider, Amount::from_raw(2_000_000));
+        setup_asset(
+            &mut state,
+            token_a,
+            liquidity_provider,
+            Amount::from_raw(1_000_000),
+        );
+        setup_asset(
+            &mut state,
+            token_b,
+            liquidity_provider,
+            Amount::from_raw(2_000_000),
+        );
 
         let pool = create_pool(
             &mut state,
@@ -186,7 +200,16 @@ mod tests {
         setup_asset(&mut state, token_a, lp, Amount::from_raw(1_000_000));
         setup_asset(&mut state, token_b, lp, Amount::from_raw(2_000_000));
 
-        create_pool(&mut state, &lp, token_a, token_b, Amount::from_raw(1_000_000), Amount::from_raw(2_000_000), 0).unwrap();
+        create_pool(
+            &mut state,
+            &lp,
+            token_a,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(2_000_000),
+            0,
+        )
+        .unwrap();
 
         let mut rec = state.get_ownership(&token_b, &trader);
         rec.credit(Amount::from_raw(200_000));
@@ -221,7 +244,16 @@ mod tests {
         setup_asset(&mut state, token_a, lp, Amount::from_raw(1_000_000));
         setup_asset(&mut state, token_b, lp, Amount::from_raw(2_000_000));
 
-        create_pool(&mut state, &lp, token_a, token_b, Amount::from_raw(1_000_000), Amount::from_raw(2_000_000), 0).unwrap();
+        create_pool(
+            &mut state,
+            &lp,
+            token_a,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(2_000_000),
+            0,
+        )
+        .unwrap();
 
         let pool_id = compute_pool_id(&token_a, &token_b);
 
@@ -247,7 +279,16 @@ mod tests {
         setup_asset(&mut state, token_a, lp, Amount::from_raw(1_000_000));
         setup_asset(&mut state, token_b, lp, Amount::from_raw(2_000_000));
 
-        create_pool(&mut state, &lp, token_a, token_b, Amount::from_raw(1_000_000), Amount::from_raw(2_000_000), 0).unwrap();
+        create_pool(
+            &mut state,
+            &lp,
+            token_a,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(2_000_000),
+            0,
+        )
+        .unwrap();
 
         let mut rec = state.get_ownership(&token_a, &trader);
         rec.credit(Amount::from_raw(100_000));
@@ -278,10 +319,21 @@ mod tests {
         setup_asset(&mut state, token_b, lp, Amount::from_raw(2_000_000));
         state.add_balance(&lp, Amount::from_raw(1_000_000)).unwrap();
 
-        create_pool(&mut state, &lp, native, token_b, Amount::from_raw(1_000_000), Amount::from_raw(2_000_000), 0).unwrap();
+        create_pool(
+            &mut state,
+            &lp,
+            native,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(2_000_000),
+            0,
+        )
+        .unwrap();
 
         // Give trader native VTT
-        state.add_balance(&trader, Amount::from_raw(100_000)).unwrap();
+        state
+            .add_balance(&trader, Amount::from_raw(100_000))
+            .unwrap();
 
         // Pool ID: sorted(native, token_b)
         let pool_id = compute_pool_id(&native, &token_b);

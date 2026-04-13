@@ -379,7 +379,11 @@ fn dex_swap_lifecycle() {
 
     let (receipts, _) =
         execute_block_transactions(&mut state, &[create_asset_tx], &gas_config, 10_000_000);
-    assert!(receipts[0].success, "CreateAssetClass failed: {:?}", receipts[0]);
+    assert!(
+        receipts[0].success,
+        "CreateAssetClass failed: {:?}",
+        receipts[0]
+    );
 
     // Derive asset_id the same way the executor does
     let asset_id = blake3_hash(&borsh::to_vec(&(alice_addr, "Virtual USDT", "vUSDT")).unwrap());
@@ -396,7 +400,7 @@ fn dex_swap_lifecycle() {
         &alice_kp,
         1,
         TransactionAction::CreatePool {
-            token_a: H256::ZERO,       // native VTT
+            token_a: H256::ZERO, // native VTT
             token_b: asset_id,
             amount_a: pool_amount_vtt,
             amount_b: pool_amount_vusdt,
@@ -443,8 +447,7 @@ fn dex_swap_lifecycle() {
         },
     );
 
-    let (receipts, _) =
-        execute_block_transactions(&mut state, &[swap_tx], &gas_config, 10_000_000);
+    let (receipts, _) = execute_block_transactions(&mut state, &[swap_tx], &gas_config, 10_000_000);
     assert!(receipts[0].success, "Swap failed: {:?}", receipts[0]);
 
     // Step 5: Verify balances after swap

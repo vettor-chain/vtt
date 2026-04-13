@@ -311,7 +311,10 @@ fn host_storage_write(
 /// Reads log data from `[data_ptr..data_ptr+data_len]`.
 fn host_emit_log(env: FunctionEnvMut<ExecutionContext>, data_ptr: i32, data_len: i32) {
     let ctx = env.data().clone();
-    if !ctx.gas.consume(GasCosts::LOG_BASE + GasCosts::LOG_PER_BYTE * data_len as u64) {
+    if !ctx
+        .gas
+        .consume(GasCosts::LOG_BASE + GasCosts::LOG_PER_BYTE * data_len as u64)
+    {
         return; // out of gas
     }
 

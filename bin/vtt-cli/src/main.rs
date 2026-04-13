@@ -203,21 +203,18 @@ async fn cmd_stake(
     args: &[String],
     rpc_url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let validator_hex = parse_flag(args, "--validator")
-        .ok_or("missing --validator <address>")?;
-    let amount_str = parse_flag(args, "--amount")
-        .ok_or("missing --amount <vtt>")?;
-    let seed_hex = parse_flag(args, "--seed")
-        .ok_or("missing --seed <hex>")?;
+    let validator_hex = parse_flag(args, "--validator").ok_or("missing --validator <address>")?;
+    let amount_str = parse_flag(args, "--amount").ok_or("missing --amount <vtt>")?;
+    let seed_hex = parse_flag(args, "--seed").ok_or("missing --seed <hex>")?;
 
-    let validator_addr = parse_address(validator_hex)
-        .map_err(|e| format!("invalid validator address: {e}"))?;
-    let amount_vtt: u64 = amount_str.parse()
+    let validator_addr =
+        parse_address(validator_hex).map_err(|e| format!("invalid validator address: {e}"))?;
+    let amount_vtt: u64 = amount_str
+        .parse()
         .map_err(|_| "invalid amount: expected integer VTT")?;
     let amount = Amount::from_vtt(amount_vtt);
 
-    let seed_bytes = hex::decode(seed_hex)
-        .map_err(|e| format!("invalid seed hex: {e}"))?;
+    let seed_bytes = hex::decode(seed_hex).map_err(|e| format!("invalid seed hex: {e}"))?;
     if seed_bytes.len() != 32 {
         return Err("seed must be exactly 32 bytes (64 hex chars)".into());
     }
@@ -235,14 +232,10 @@ async fn cmd_stake(
     let nonce = account.nonce;
 
     // 2. Get gas config
-    let gas_config: GasConfigRpc = client
-        .request("vtt_getGasConfig", rpc_params![])
-        .await?;
+    let gas_config: GasConfigRpc = client.request("vtt_getGasConfig", rpc_params![]).await?;
 
     // 3. Get chain status for chain_id
-    let status: ChainStatus = client
-        .request("vtt_chainStatus", rpc_params![])
-        .await?;
+    let status: ChainStatus = client.request("vtt_chainStatus", rpc_params![]).await?;
 
     // 4. Build transaction payload
     let action = if command == "stake" {

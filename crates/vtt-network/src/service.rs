@@ -235,17 +235,13 @@ impl NetworkService {
     /// below, the peer is banned for `ban_duration_secs` and disconnected.
     pub fn penalize(&mut self, peer_id: &PeerId, penalty: i32) {
         let ban_duration = self.config.ban_duration_secs;
-        let rep = self
-            .reputations
-            .entry(*peer_id)
-            .or_insert(PeerReputation {
-                score: DEFAULT_REPUTATION_SCORE,
-                banned_until: None,
-            });
+        let rep = self.reputations.entry(*peer_id).or_insert(PeerReputation {
+            score: DEFAULT_REPUTATION_SCORE,
+            banned_until: None,
+        });
         rep.score = rep.score.saturating_sub(penalty).max(0);
         if rep.score == 0 {
-            rep.banned_until =
-                Some(Instant::now() + Duration::from_secs(ban_duration));
+            rep.banned_until = Some(Instant::now() + Duration::from_secs(ban_duration));
             warn!(%peer_id, "peer banned for {ban_duration}s (score dropped to {})", rep.score);
             let _ = self.swarm.disconnect_peer_id(*peer_id);
         }
@@ -317,9 +313,7 @@ impl NetworkService {
                     };
                 }
                 libp2p::swarm::SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    endpoint,
-                    ..
+                    peer_id, endpoint, ..
                 } => {
                     // Enforce global max-peers limit
                     if self.swarm.connected_peers().count() > self.config.max_peers {

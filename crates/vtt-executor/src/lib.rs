@@ -57,7 +57,15 @@ pub fn execute_block_transactions(
     gas_config: &GasConfig,
     block_gas_limit: u64,
 ) -> (Vec<TransactionReceipt>, u64) {
-    execute_block_transactions_at(state, transactions, gas_config, block_gas_limit, 0, 0, ChainId::RELAY)
+    execute_block_transactions_at(
+        state,
+        transactions,
+        gas_config,
+        block_gas_limit,
+        0,
+        0,
+        ChainId::RELAY,
+    )
 }
 
 /// Execute a batch of signed transactions at a given block height and timestamp.
@@ -80,7 +88,14 @@ pub fn execute_block_transactions_at(
             break;
         }
 
-        let result = execute_transaction_at(state, tx, gas_config, block_number, block_timestamp, chain_id);
+        let result = execute_transaction_at(
+            state,
+            tx,
+            gas_config,
+            block_number,
+            block_timestamp,
+            chain_id,
+        );
         total_gas += result.gas_used;
         receipts.push(result.receipt);
     }
@@ -277,8 +292,15 @@ fn execute_action(
             args,
             value,
         } => execute_call_contract(
-            state, sender, contract, method, args, *value,
-            block_number, block_timestamp, gas_limit,
+            state,
+            sender,
+            contract,
+            method,
+            args,
+            *value,
+            block_number,
+            block_timestamp,
+            gas_limit,
         ),
 
         TransactionAction::CreateAssetClass {
@@ -342,12 +364,28 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::CreatePool { token_a, token_b, amount_a, amount_b } => {
+        TransactionAction::CreatePool {
+            token_a,
+            token_b,
+            amount_a,
+            amount_b,
+        } => {
             let epoch_length = state.get_epoch_length();
-            let current_epoch = if epoch_length > 0 { block_number / epoch_length } else { 0 };
+            let current_epoch = if epoch_length > 0 {
+                block_number / epoch_length
+            } else {
+                0
+            };
             let pool = vtt_dex::liquidity::create_pool(
-                state, sender, *token_a, *token_b, *amount_a, *amount_b, current_epoch,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+                state,
+                sender,
+                *token_a,
+                *token_b,
+                *amount_a,
+                *amount_b,
+                current_epoch,
+            )
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"CreatePool"), pool.pool_id],
@@ -355,10 +393,16 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::AddLiquidity { pool_id, amount_a, amount_b, min_lp } => {
+        TransactionAction::AddLiquidity {
+            pool_id,
+            amount_a,
+            amount_b,
+            min_lp,
+        } => {
             let lp_minted = vtt_dex::liquidity::add_liquidity(
                 state, sender, pool_id, *amount_a, *amount_b, *min_lp,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            )
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"AddLiquidity"), *pool_id],
@@ -366,10 +410,16 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::RemoveLiquidity { pool_id, lp_amount, min_a, min_b } => {
+        TransactionAction::RemoveLiquidity {
+            pool_id,
+            lp_amount,
+            min_a,
+            min_b,
+        } => {
             let (out_a, out_b) = vtt_dex::liquidity::remove_liquidity(
                 state, sender, pool_id, *lp_amount, *min_a, *min_b,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            )
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"RemoveLiquidity"), *pool_id],
@@ -377,10 +427,21 @@ fn execute_action(
             }])
         }
 
-        TransactionAction::Swap { pool_id, token_in, amount_in, min_amount_out } => {
+        TransactionAction::Swap {
+            pool_id,
+            token_in,
+            amount_in,
+            min_amount_out,
+        } => {
             let amount_out = vtt_dex::swap::execute_swap(
-                state, sender, pool_id, token_in, *amount_in, *min_amount_out,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+                state,
+                sender,
+                pool_id,
+                token_in,
+                *amount_in,
+                *min_amount_out,
+            )
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"Swap"), *pool_id],
@@ -390,9 +451,9 @@ fn execute_action(
 
         TransactionAction::ClaimRevenue { pool_id } => {
             let treasury = state.get_treasury_address();
-            let (fees_a, fees_b) = vtt_dex::revenue::claim_protocol_fees(
-                state, sender, pool_id, &treasury,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+            let (fees_a, fees_b) =
+                vtt_dex::revenue::claim_protocol_fees(state, sender, pool_id, &treasury)
+                    .map_err(|e| ExecutionError::Custom(e.to_string()))?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"ClaimRevenue"), *pool_id],
@@ -402,22 +463,35 @@ fn execute_action(
 
         TransactionAction::ClaimMiningRewards { pool_id } => {
             let epoch_length = state.get_epoch_length();
-            let current_epoch = if epoch_length > 0 { block_number / epoch_length } else { 0 };
+            let current_epoch = if epoch_length > 0 {
+                block_number / epoch_length
+            } else {
+                0
+            };
 
             // Load mining state from storage
-            let mining_data = state.get_mining_state_raw(pool_id)
-                .ok_or_else(|| ExecutionError::Custom("mining not active for this pool".to_string()))?
+            let mining_data = state
+                .get_mining_state_raw(pool_id)
+                .ok_or_else(|| {
+                    ExecutionError::Custom("mining not active for this pool".to_string())
+                })?
                 .to_vec();
             let mut mining_state = vtt_dex::MiningState::try_from_slice(&mining_data)
                 .map_err(|_| ExecutionError::Custom("corrupt mining state".to_string()))?;
 
             let reward_amount = vtt_dex::mining::claim_mining_rewards(
-                state, sender, pool_id, current_epoch, &mut mining_state,
-            ).map_err(|e| ExecutionError::Custom(e.to_string()))?;
+                state,
+                sender,
+                pool_id,
+                current_epoch,
+                &mut mining_state,
+            )
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
 
             // Save updated mining state
-            let updated_data = borsh::to_vec(&mining_state)
-                .map_err(|_| ExecutionError::Custom("failed to serialize mining state".to_string()))?;
+            let updated_data = borsh::to_vec(&mining_state).map_err(|_| {
+                ExecutionError::Custom("failed to serialize mining state".to_string())
+            })?;
             state.put_mining_state_raw(*pool_id, updated_data);
 
             Ok(vec![Log {
@@ -430,28 +504,27 @@ fn execute_action(
         TransactionAction::DistributeRevenue {
             asset_id,
             total_amount,
-        } => {
-            execute_distribute_revenue(state, sender, asset_id, *total_amount)
-        }
+        } => execute_distribute_revenue(state, sender, asset_id, *total_amount),
 
         TransactionAction::ProposeAssetAction {
             asset_id,
             action,
             description,
-        } => {
-            execute_propose_asset_action(state, sender, asset_id, action, description, block_number, nonce)
-        }
+        } => execute_propose_asset_action(
+            state,
+            sender,
+            asset_id,
+            action,
+            description,
+            block_number,
+            nonce,
+        ),
 
-        TransactionAction::VoteAssetProposal {
-            proposal_id,
-            vote,
-        } => {
+        TransactionAction::VoteAssetProposal { proposal_id, vote } => {
             execute_vote_asset_proposal(state, sender, proposal_id, *vote, block_number)
         }
 
-        TransactionAction::FinalizeAssetProposal {
-            proposal_id,
-        } => {
+        TransactionAction::FinalizeAssetProposal { proposal_id } => {
             execute_finalize_asset_proposal(state, sender, proposal_id, block_number)
         }
 
@@ -460,9 +533,14 @@ fn execute_action(
             amount,
             destination_chain,
             destination_address,
-        } => {
-            execute_bridge_withdraw(state, sender, token, *amount, *destination_chain, destination_address)
-        }
+        } => execute_bridge_withdraw(
+            state,
+            sender,
+            token,
+            *amount,
+            *destination_chain,
+            destination_address,
+        ),
 
         TransactionAction::GovernancePropose {
             description,
@@ -698,7 +776,9 @@ fn execute_call_contract(
 
     // Pre-populate the execution context with existing storage
     {
-        let mut storage = ctx.storage.lock()
+        let mut storage = ctx
+            .storage
+            .lock()
             .map_err(|_| ExecutionError::Custom("contract storage lock poisoned".into()))?;
         for (key, val) in existing_storage {
             storage.insert(key, val);
@@ -722,7 +802,9 @@ fn execute_call_contract(
 
     // Persist storage changes back to StateDB
     {
-        let storage = ctx.storage.lock()
+        let storage = ctx
+            .storage
+            .lock()
             .map_err(|_| ExecutionError::Custom("contract storage lock poisoned".into()))?;
         for (key, val) in storage.iter() {
             state.put_contract_storage(*contract, key.clone(), val.clone());
@@ -814,9 +896,7 @@ fn execute_distribute_revenue(
     }
     let total_supply = asset.total_supply;
     if total_supply.is_zero() {
-        return Err(ExecutionError::Custom(
-            "asset has zero total supply".into(),
-        ));
+        return Err(ExecutionError::Custom("asset has zero total supply".into()));
     }
 
     // Collect holders snapshot (we need to iterate first, then mutate state)
@@ -845,7 +925,11 @@ fn execute_distribute_revenue(
     for (holder_addr, holder_available) in &holders {
         // Use u128 multiplication; the product could overflow u128 for very large amounts,
         // so we use a simple safe helper: a * b / c with u128.
-        let share_raw = mul_div(holder_available.raw(), total_amount.raw(), total_supply.raw());
+        let share_raw = mul_div(
+            holder_available.raw(),
+            total_amount.raw(),
+            total_supply.raw(),
+        );
         if share_raw > 0 {
             let share = Amount::from_raw(share_raw);
             state.add_balance(holder_addr, share)?;
@@ -948,16 +1032,12 @@ fn execute_vote_asset_proposal(
 
     // Verify it's Active
     if proposal.status != AssetProposalStatus::Active {
-        return Err(ExecutionError::Custom(
-            "proposal is not active".into(),
-        ));
+        return Err(ExecutionError::Custom("proposal is not active".into()));
     }
 
     // Verify voting hasn't ended
     if proposal.is_voting_ended(current_block) {
-        return Err(ExecutionError::Custom(
-            "voting period has ended".into(),
-        ));
+        return Err(ExecutionError::Custom("voting period has ended".into()));
     }
 
     // Verify sender hasn't already voted
@@ -1013,9 +1093,7 @@ fn execute_finalize_asset_proposal(
 
     // Verify it's Active
     if proposal.status != AssetProposalStatus::Active {
-        return Err(ExecutionError::Custom(
-            "proposal is not active".into(),
-        ));
+        return Err(ExecutionError::Custom("proposal is not active".into()));
     }
 
     // Verify voting period has ended
@@ -1058,9 +1136,9 @@ fn execute_finalize_asset_proposal(
             }
             AssetProposalAction::ChangeIssuer { new_issuer } => {
                 // Update the asset's issuer field
-                let asset_mut = state
-                    .get_asset_mut(&asset_id)
-                    .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+                let asset_mut = state.get_asset_mut(&asset_id).ok_or_else(|| {
+                    ExecutionError::Custom(format!("asset not found: {asset_id}"))
+                })?;
                 asset_mut.issuer = *new_issuer;
             }
             AssetProposalAction::Signal { .. } => {
@@ -1083,7 +1161,11 @@ fn execute_finalize_asset_proposal(
 
     let final_status = match state.get_asset_proposal(proposal_id) {
         Some(p) => p.status.clone(),
-        None => return Err(ExecutionError::Custom("asset proposal disappeared during finalization".into())),
+        None => {
+            return Err(ExecutionError::Custom(
+                "asset proposal disappeared during finalization".into(),
+            ))
+        }
     };
     let status_str = match &final_status {
         AssetProposalStatus::Executed => "Executed",
@@ -1128,7 +1210,14 @@ fn execute_bridge_withdraw(
     Ok(vec![Log {
         address: *sender,
         topics: vec![blake3_hash(b"BridgeWithdraw"), *token],
-        data: borsh::to_vec(&(*sender, *token, amount, destination_chain, *destination_address)).unwrap(),
+        data: borsh::to_vec(&(
+            *sender,
+            *token,
+            amount,
+            destination_chain,
+            *destination_address,
+        ))
+        .unwrap(),
     }])
 }
 
@@ -1206,7 +1295,8 @@ fn execute_governance_propose(
     );
 
     // Serialize and store the proposal in state
-    let proposal = gov.get(&proposal_id)
+    let proposal = gov
+        .get(&proposal_id)
         .ok_or_else(|| ExecutionError::Custom("governance proposal creation failed".into()))?
         .clone();
     let proposal_bytes = borsh::to_vec(&proposal)
@@ -1249,7 +1339,9 @@ fn execute_governance_vote(
 
     // Verify sender hasn't already voted
     if proposal.has_voted(sender) {
-        return Err(ExecutionError::Custom("already voted on this proposal".into()));
+        return Err(ExecutionError::Custom(
+            "already voted on this proposal".into(),
+        ));
     }
 
     // Get sender's voting power (staked VTT)
@@ -1257,9 +1349,7 @@ fn execute_governance_vote(
     let voting_power = match &sender_account.staking {
         Some(staking) if !staking.total_stake.is_zero() => staking.total_stake,
         _ => {
-            return Err(ExecutionError::Custom(
-                "no staked VTT to vote with".into(),
-            ));
+            return Err(ExecutionError::Custom("no staked VTT to vote with".into()));
         }
     };
 
@@ -1396,8 +1486,7 @@ pub fn finalize_governance_proposals(
             state.put_governance_proposal(proposal_id, updated_bytes);
             debug!(
                 ?proposal_id,
-                execute_after,
-                "governance proposal queued for execution after timelock"
+                execute_after, "governance proposal queued for execution after timelock"
             );
         } else {
             // Mark as Rejected
@@ -1413,10 +1502,7 @@ pub fn finalize_governance_proposals(
         finalized_count += 1;
         debug!(
             ?proposal_id,
-            passed,
-            has_quorum,
-            passes_threshold,
-            "governance proposal finalized"
+            passed, has_quorum, passes_threshold, "governance proposal finalized"
         );
     }
 
@@ -1424,11 +1510,8 @@ pub fn finalize_governance_proposals(
 }
 
 /// Execute governance proposals whose timelock has expired.
-pub fn execute_queued_proposals(
-    state: &mut StateDB,
-    current_block: u64,
-) -> u64 {
-    use vtt_consensus::governance::{ProposalStatus, ProposalAction};
+pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 {
+    use vtt_consensus::governance::{ProposalAction, ProposalStatus};
 
     let proposals_raw: Vec<(H256, Vec<u8>)> = state
         .iter_governance_proposals()
@@ -1457,7 +1540,12 @@ pub fn execute_queued_proposals(
 
         match &proposal.action {
             ProposalAction::ParameterChange { key, value } => {
-                debug!(key, value, ?proposal_id, "governance parameter change executed");
+                debug!(
+                    key,
+                    value,
+                    ?proposal_id,
+                    "governance parameter change executed"
+                );
             }
             ProposalAction::TreasurySpend { recipient, amount } => {
                 let treasury_addr = state.get_treasury_address();
@@ -1473,12 +1561,21 @@ pub fn execute_queued_proposals(
             ProposalAction::RegisterChain { name, .. } => {
                 debug!(?proposal_id, name, "chain registration signal executed");
             }
-            ProposalAction::ProtocolUpgrade { version, description } => {
-                debug!(?proposal_id, version, description, "protocol upgrade signal executed");
+            ProposalAction::ProtocolUpgrade {
+                version,
+                description,
+            } => {
+                debug!(
+                    ?proposal_id,
+                    version, description, "protocol upgrade signal executed"
+                );
             }
             ProposalAction::DexPause(paused) => {
                 state.set_dex_paused(*paused);
-                debug!(?proposal_id, paused, "DEX pause state updated via governance");
+                debug!(
+                    ?proposal_id,
+                    paused, "DEX pause state updated via governance"
+                );
             }
         }
 
@@ -1490,7 +1587,10 @@ pub fn execute_queued_proposals(
         };
         state.put_governance_proposal(proposal_id, updated_bytes);
         executed_count += 1;
-        debug!(?proposal_id, "queued governance proposal executed after timelock");
+        debug!(
+            ?proposal_id,
+            "queued governance proposal executed after timelock"
+        );
     }
 
     executed_count

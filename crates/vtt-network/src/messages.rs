@@ -36,10 +36,7 @@ pub enum NetworkMessage {
     },
 
     /// Response to a block range request.
-    BlockRangeResponse {
-        request_id: u64,
-        blocks: Vec<Block>,
-    },
+    BlockRangeResponse { request_id: u64, blocks: Vec<Block> },
 
     /// Peer status exchange (handshake).
     Status {

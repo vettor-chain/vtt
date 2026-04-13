@@ -229,12 +229,8 @@ mod tests {
         // Insert block bodies and receipts for blocks 0..10
         for height in 0u64..10 {
             let key = height.to_be_bytes();
-            store
-                .put(Column::BlockBodies, &key, b"body")
-                .unwrap();
-            store
-                .put(Column::Receipts, &key, b"receipt")
-                .unwrap();
+            store.put(Column::BlockBodies, &key, b"body").unwrap();
+            store.put(Column::Receipts, &key, b"receipt").unwrap();
         }
 
         // Prune keeping last 5 blocks (current_height=10, keep_recent=5 -> prune below 5)
@@ -268,9 +264,7 @@ mod tests {
     #[test]
     fn rocks_compact_does_not_panic() {
         let (store, _dir) = open_test_db();
-        store
-            .put(Column::BlockHeaders, b"key", b"value")
-            .unwrap();
+        store.put(Column::BlockHeaders, b"key", b"value").unwrap();
         // Just verify compact does not panic
         store.compact();
     }

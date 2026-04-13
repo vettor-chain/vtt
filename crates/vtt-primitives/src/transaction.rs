@@ -24,10 +24,16 @@ pub struct TransactionPayload {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub enum TransactionAction {
     /// Simple VTT transfer.
-    Transfer { to: Address, amount: Amount },
+    Transfer {
+        to: Address,
+        amount: Amount,
+    },
 
     /// Deploy a smart contract.
-    DeployContract { code: Vec<u8>, init_data: Vec<u8> },
+    DeployContract {
+        code: Vec<u8>,
+        init_data: Vec<u8>,
+    },
 
     /// Call a deployed contract.
     CallContract {
@@ -38,13 +44,22 @@ pub enum TransactionAction {
     },
 
     /// Stake VTT to a validator (or self-stake as a validator).
-    Stake { validator: Address, amount: Amount },
+    Stake {
+        validator: Address,
+        amount: Amount,
+    },
 
     /// Unstake VTT (begins unbonding period).
-    Unstake { validator: Address, amount: Amount },
+    Unstake {
+        validator: Address,
+        amount: Amount,
+    },
 
     /// Cast governance vote.
-    GovernanceVote { proposal_id: H256, vote: Vote },
+    GovernanceVote {
+        proposal_id: H256,
+        vote: Vote,
+    },
 
     /// Create a new asset class on this chain (RWA native).
     CreateAssetClass {

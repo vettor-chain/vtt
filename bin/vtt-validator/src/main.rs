@@ -10,7 +10,9 @@ use vtt_consensus::finality::{FinalityTracker, FinalityVote};
 use vtt_consensus::rewards::{calculate_epoch_reward, split_block_reward, split_gas_fees};
 use vtt_consensus::ConsensusEngine;
 use vtt_crypto::{blake3_hash, merkle_root, Keypair};
-use vtt_executor::{execute_block_transactions_at, execute_queued_proposals, finalize_governance_proposals};
+use vtt_executor::{
+    execute_block_transactions_at, execute_queued_proposals, finalize_governance_proposals,
+};
 use vtt_genesis::{build_genesis, genesis_hash, GenesisConfig};
 use vtt_network::messages::NetworkMessage;
 use vtt_network::{NetworkConfig, NetworkEvent, NetworkService};
@@ -96,7 +98,12 @@ async fn main() {
         .iter()
         .position(|a| a == "--bootnodes")
         .and_then(|i| args.get(i + 1))
-        .map(|s| s.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
 
     // --data-dir <path> : directory for persistent RocksDB storage
@@ -179,7 +186,11 @@ async fn main() {
         None
     };
     let mut chain = if let Some(ref store) = rocks_store {
-        Chain::with_storage(consensus, gas_config.clone(), store.clone() as Arc<dyn vtt_storage::KeyValueStore>)
+        Chain::with_storage(
+            consensus,
+            gas_config.clone(),
+            store.clone() as Arc<dyn vtt_storage::KeyValueStore>,
+        )
     } else {
         Chain::new(consensus, gas_config.clone())
     };
@@ -192,7 +203,9 @@ async fn main() {
     if let Some(height) = chain.height() {
         metrics.block_height.set(height as i64);
     }
-    metrics.active_validators.set(chain.validator_set().validators.len() as i64);
+    metrics
+        .active_validators
+        .set(chain.validator_set().validators.len() as i64);
 
     let chain = Arc::new(RwLock::new(chain));
     let txpool = Arc::new(RwLock::new(TxPool::new(TxPoolConfig::default())));
@@ -429,7 +442,11 @@ fn handle_network_message(
     finality_tracker: &mut FinalityTracker,
 ) -> Vec<NetworkMessage> {
     match msg {
-        NetworkMessage::BlockAnnounce { block_hash, block_number, block } => {
+        NetworkMessage::BlockAnnounce {
+            block_hash,
+            block_number,
+            block,
+        } => {
             // Don't import our own blocks (they're already imported during production)
             if block.header.validator == *validator_addr {
                 return vec![];
@@ -493,7 +510,11 @@ fn handle_network_message(
         }
 
         // T1: Block sync protocol — Status exchange
-        NetworkMessage::Status { best_block_number, genesis_hash: _peer_genesis, .. } => {
+        NetworkMessage::Status {
+            best_block_number,
+            genesis_hash: _peer_genesis,
+            ..
+        } => {
             let chain_r = match chain.read() {
                 Ok(c) => c,
                 Err(_) => return vec![],
@@ -505,16 +526,34 @@ fn handle_network_message(
                 let from = our_height + 1;
                 let count = ((best_block_number - our_height) as u32).min(SYNC_BATCH_SIZE);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                info!(our_height, peer_height = best_block_number, from, count, "peer is ahead, requesting blocks");
-                vec![NetworkMessage::BlockRangeRequest { request_id, from_number: from, count }]
+                info!(
+                    our_height,
+                    peer_height = best_block_number,
+                    from,
+                    count,
+                    "peer is ahead, requesting blocks"
+                );
+                vec![NetworkMessage::BlockRangeRequest {
+                    request_id,
+                    from_number: from,
+                    count,
+                }]
             } else {
-                debug!(our_height, peer_height = best_block_number, "peer is at or behind our height");
+                debug!(
+                    our_height,
+                    peer_height = best_block_number,
+                    "peer is at or behind our height"
+                );
                 vec![]
             }
         }
 
         // T1: Respond to block range requests
-        NetworkMessage::BlockRangeRequest { request_id, from_number, count } => {
+        NetworkMessage::BlockRangeRequest {
+            request_id,
+            from_number,
+            count,
+        } => {
             let chain_r = match chain.read() {
                 Ok(c) => c,
                 Err(_) => return vec![],
@@ -529,7 +568,12 @@ fn handle_network_message(
                     break;
                 }
             }
-            debug!(request_id, from_number, sent = blocks.len(), "responding to block range request");
+            debug!(
+                request_id,
+                from_number,
+                sent = blocks.len(),
+                "responding to block range request"
+            );
             vec![NetworkMessage::BlockRangeResponse { request_id, blocks }]
         }
 
@@ -542,7 +586,13 @@ fn handle_network_message(
             // blocks is guaranteed non-empty by the guard above
             let first = blocks[0].header.number;
             let last = blocks[blocks.len() - 1].header.number;
-            info!(request_id, first, last, count = blocks.len(), "received block range response");
+            info!(
+                request_id,
+                first,
+                last,
+                count = blocks.len(),
+                "received block range response"
+            );
 
             let mut chain = match chain.write() {
                 Ok(c) => c,
@@ -573,7 +623,8 @@ fn handle_network_message(
                 // If the peer sent a full batch, there may be more
                 if block_count == SYNC_BATCH_SIZE {
                     let next_from = our_height + 1;
-                    let next_id = NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let next_id =
+                        NEXT_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     info!(our_height, next_from, "requesting more sync blocks");
                     return vec![NetworkMessage::BlockRangeRequest {
                         request_id: next_id,
@@ -620,7 +671,12 @@ fn handle_network_message(
         }
 
         // T2: Handle finality votes from peers
-        NetworkMessage::FinalityVote { voter, block_hash, block_number, .. } => {
+        NetworkMessage::FinalityVote {
+            voter,
+            block_hash,
+            block_number,
+            ..
+        } => {
             let vote = FinalityVote {
                 voter,
                 block_hash,
@@ -708,16 +764,15 @@ fn try_produce_block(
     }
 
     // Execute transactions with actual block number and timestamp
-    let (receipts, gas_used) =
-        execute_block_transactions_at(
-            chain.state_mut(),
-            &txs,
-            gas_config,
-            10_000_000,
-            next_number,
-            now_ms,
-            head.chain_id,
-        );
+    let (receipts, gas_used) = execute_block_transactions_at(
+        chain.state_mut(),
+        &txs,
+        gas_config,
+        10_000_000,
+        next_number,
+        now_ms,
+        head.chain_id,
+    );
 
     // --- M4: Auto-finalize governance proposals whose voting period has ended ---
     let total_staked = chain.validator_set().total_stake();
@@ -729,7 +784,10 @@ fn try_produce_block(
     // --- Execute queued governance proposals whose timelock has expired ---
     let gov_executed = execute_queued_proposals(chain.state_mut(), next_number);
     if gov_executed > 0 {
-        info!(count = gov_executed, "queued governance proposals executed after timelock");
+        info!(
+            count = gov_executed,
+            "queued governance proposals executed after timelock"
+        );
     }
 
     // --- Block rewards & gas fee distribution ---
@@ -740,13 +798,22 @@ fn try_produce_block(
     // Circulating supply = initial genesis supply (1B) + total minted - total burned
     let initial_supply = Amount::from_vtt(1_000_000_000);
     let minted = Amount::from_raw(
-        rpc_state.total_minted_milli.load(std::sync::atomic::Ordering::Relaxed) as u128 * 10u128.pow(15),
+        rpc_state
+            .total_minted_milli
+            .load(std::sync::atomic::Ordering::Relaxed) as u128
+            * 10u128.pow(15),
     );
     let burned = Amount::from_raw(
-        rpc_state.total_burned_milli.load(std::sync::atomic::Ordering::Relaxed) as u128 * 10u128.pow(15),
+        rpc_state
+            .total_burned_milli
+            .load(std::sync::atomic::Ordering::Relaxed) as u128
+            * 10u128.pow(15),
     );
     let total_supply = Amount::from_raw(
-        initial_supply.raw().saturating_add(minted.raw()).saturating_sub(burned.raw()),
+        initial_supply
+            .raw()
+            .saturating_add(minted.raw())
+            .saturating_sub(burned.raw()),
     );
     let staking_ratio_pct = if total_supply.raw() > 0 {
         (total_staked.raw() * 100 / total_supply.raw()) as u64
@@ -763,11 +830,17 @@ fn try_produce_block(
 
     if per_block_reward.raw() > 0 {
         let split = split_block_reward(per_block_reward);
-        let _ = chain.state_mut().add_balance(&validator_addr, split.producer);
-        let _ = chain.state_mut().add_balance(&treasury_addr, split.treasury);
+        let _ = chain
+            .state_mut()
+            .add_balance(&validator_addr, split.producer);
+        let _ = chain
+            .state_mut()
+            .add_balance(&treasury_addr, split.treasury);
         // Track in milli-VTT (raw / 10^15)
         let minted_milli = (per_block_reward.raw() / 10u128.pow(15)) as u64;
-        rpc_state.total_minted_milli.fetch_add(minted_milli, std::sync::atomic::Ordering::Relaxed);
+        rpc_state
+            .total_minted_milli
+            .fetch_add(minted_milli, std::sync::atomic::Ordering::Relaxed);
     }
 
     // 2. Gas fees: 70% burned, 30% to producer
@@ -775,9 +848,13 @@ fn try_produce_block(
     if total_gas_fees.raw() > 0 {
         let gas_split = split_gas_fees(total_gas_fees);
         // burned portion is simply not credited to anyone (effectively removed)
-        let _ = chain.state_mut().add_balance(&validator_addr, gas_split.producer);
+        let _ = chain
+            .state_mut()
+            .add_balance(&validator_addr, gas_split.producer);
         let burned_milli = (gas_split.burned.raw() / 10u128.pow(15)) as u64;
-        rpc_state.total_burned_milli.fetch_add(burned_milli, std::sync::atomic::Ordering::Relaxed);
+        rpc_state
+            .total_burned_milli
+            .fetch_add(burned_milli, std::sync::atomic::Ordering::Relaxed);
     }
 
     let state_root = chain.state_mut().compute_state_root();

@@ -98,13 +98,11 @@ pub fn add_liquidity(
     }
 
     // Calculate optimal amounts maintaining ratio
-    let optimal_b = U256::mul_u128(amount_a.0, pool.reserve_b.0)
-        .div_u128(pool.reserve_a.0)?;
+    let optimal_b = U256::mul_u128(amount_a.0, pool.reserve_b.0).div_u128(pool.reserve_a.0)?;
     let (actual_a, actual_b) = if optimal_b <= amount_b.0 {
         (amount_a.0, optimal_b)
     } else {
-        let optimal_a = U256::mul_u128(amount_b.0, pool.reserve_a.0)
-            .div_u128(pool.reserve_b.0)?;
+        let optimal_a = U256::mul_u128(amount_b.0, pool.reserve_a.0).div_u128(pool.reserve_b.0)?;
         (optimal_a, amount_b.0)
     };
 
@@ -113,10 +111,8 @@ pub fn add_liquidity(
     }
 
     // Mint LP tokens proportional to contribution
-    let lp_a = U256::mul_u128(actual_a, pool.lp_total_supply.0)
-        .div_u128(pool.reserve_a.0)?;
-    let lp_b = U256::mul_u128(actual_b, pool.lp_total_supply.0)
-        .div_u128(pool.reserve_b.0)?;
+    let lp_a = U256::mul_u128(actual_a, pool.lp_total_supply.0).div_u128(pool.reserve_a.0)?;
+    let lp_b = U256::mul_u128(actual_b, pool.lp_total_supply.0).div_u128(pool.reserve_b.0)?;
     let lp_minted = std::cmp::min(lp_a, lp_b);
 
     if lp_minted < min_lp.0 {
@@ -163,16 +159,22 @@ pub fn remove_liquidity(
     }
 
     // Calculate proportional share
-    let amount_a = U256::mul_u128(lp_amount.0, pool.reserve_a.0)
-        .div_u128(pool.lp_total_supply.0)?;
-    let amount_b = U256::mul_u128(lp_amount.0, pool.reserve_b.0)
-        .div_u128(pool.lp_total_supply.0)?;
+    let amount_a =
+        U256::mul_u128(lp_amount.0, pool.reserve_a.0).div_u128(pool.lp_total_supply.0)?;
+    let amount_b =
+        U256::mul_u128(lp_amount.0, pool.reserve_b.0).div_u128(pool.lp_total_supply.0)?;
 
     if amount_a < min_a.0 {
-        return Err(DexError::SlippageExceeded { expected: min_a.0, got: amount_a });
+        return Err(DexError::SlippageExceeded {
+            expected: min_a.0,
+            got: amount_a,
+        });
     }
     if amount_b < min_b.0 {
-        return Err(DexError::SlippageExceeded { expected: min_b.0, got: amount_b });
+        return Err(DexError::SlippageExceeded {
+            expected: min_b.0,
+            got: amount_b,
+        });
     }
 
     // Burn LP tokens from sender
@@ -221,7 +223,9 @@ pub(crate) fn transfer_token_in(
     amount: Amount,
 ) -> Result<(), DexError> {
     if PoolState::is_native(token) {
-        state.sub_balance(sender, amount).map_err(|_| DexError::InsufficientBalance)?;
+        state
+            .sub_balance(sender, amount)
+            .map_err(|_| DexError::InsufficientBalance)?;
     } else {
         // For assets, debit from sender's ownership. Pool address = Address::ZERO.
         state
@@ -238,7 +242,9 @@ pub(crate) fn transfer_token_out(
     amount: Amount,
 ) -> Result<(), DexError> {
     if PoolState::is_native(token) {
-        state.add_balance(recipient, amount).map_err(|_| DexError::Overflow)?;
+        state
+            .add_balance(recipient, amount)
+            .map_err(|_| DexError::Overflow)?;
     } else {
         state
             .transfer_asset(token, &Address::ZERO, recipient, amount)
@@ -277,7 +283,9 @@ fn register_lp_asset(
         created_at: 0,
     };
 
-    state.register_asset(asset).map_err(|_| DexError::Overflow)?;
+    state
+        .register_asset(asset)
+        .map_err(|_| DexError::Overflow)?;
     Ok(())
 }
 
@@ -391,16 +399,8 @@ mod tests {
         setup_asset(&mut state, token_a, sender, amount_a);
         setup_asset(&mut state, token_b, sender, amount_b);
 
-        let pool = create_pool(
-            &mut state,
-            &sender,
-            token_a,
-            token_b,
-            amount_a,
-            amount_b,
-            1,
-        )
-        .unwrap();
+        let pool =
+            create_pool(&mut state, &sender, token_a, token_b, amount_a, amount_b, 1).unwrap();
 
         assert_eq!(pool.reserve_a, amount_a);
         assert_eq!(pool.reserve_b, amount_b);
@@ -452,11 +452,28 @@ mod tests {
         setup_asset(&mut state, token_a, sender, Amount::from_raw(2_000_000));
         setup_asset(&mut state, token_b, sender, Amount::from_raw(8_000_000));
 
-        create_pool(&mut state, &sender, token_a, token_b, Amount::from_raw(1_000_000), Amount::from_raw(4_000_000), 0).unwrap();
+        create_pool(
+            &mut state,
+            &sender,
+            token_a,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(4_000_000),
+            0,
+        )
+        .unwrap();
 
         // Re-register tokens for second create attempt
         // (already registered — but we need balance for the second attempt, it won't reach that point)
-        let err = create_pool(&mut state, &sender, token_a, token_b, Amount::from_raw(1_000_000), Amount::from_raw(4_000_000), 0);
+        let err = create_pool(
+            &mut state,
+            &sender,
+            token_a,
+            token_b,
+            Amount::from_raw(1_000_000),
+            Amount::from_raw(4_000_000),
+            0,
+        );
         assert!(matches!(err, Err(DexError::PoolAlreadyExists { .. })));
     }
 

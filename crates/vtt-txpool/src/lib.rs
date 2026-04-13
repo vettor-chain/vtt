@@ -42,7 +42,7 @@ impl Default for TxPoolConfig {
             max_size: 10_000,
             max_per_account: 100,
             min_gas_price: Amount::from_raw(1_000_000_000), // 1 gwei
-            tx_ttl_secs: 3600, // 1 hour
+            tx_ttl_secs: 3600,                              // 1 hour
         }
     }
 }

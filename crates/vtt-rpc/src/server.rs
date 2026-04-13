@@ -172,9 +172,7 @@ pub trait VttApi {
 
     /// Get all bridge withdrawal events (for relayer monitoring).
     #[method(name = "vtt_getBridgeWithdrawals")]
-    async fn get_bridge_withdrawals(
-        &self,
-    ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned>;
+    async fn get_bridge_withdrawals(&self) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned>;
 
     /// Get node metrics for monitoring.
     #[method(name = "vtt_getNodeMetrics")]
@@ -190,11 +188,19 @@ pub trait VttApi {
 
     /// Get a range of blocks starting from a given number.
     #[method(name = "vtt_getBlockRange")]
-    async fn get_block_range(&self, from: u64, count: u64) -> Result<Vec<BlockInfo>, ErrorObjectOwned>;
+    async fn get_block_range(
+        &self,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<BlockInfo>, ErrorObjectOwned>;
 
     /// Get balances for multiple assets at once.
     #[method(name = "vtt_getAssetBalances")]
-    async fn get_asset_balances(&self, address: Address, asset_ids: Vec<H256>) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
+    async fn get_asset_balances(
+        &self,
+        address: Address,
+        asset_ids: Vec<H256>,
+    ) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
 }
 
 /// Per-IP rate limiter for sendTransaction -- sliding window counter.
@@ -259,9 +265,9 @@ impl PerIpRateLimiter {
 fn read_chain(
     chain: &Arc<RwLock<Chain>>,
 ) -> Result<std::sync::RwLockReadGuard<'_, Chain>, ErrorObjectOwned> {
-    chain
-        .read()
-        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>))
+    chain.read().map_err(|_| {
+        ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>)
+    })
 }
 
 /// Helper: acquire a write lock on the chain, returning a JSON-RPC internal error on lock poisoning.
@@ -269,27 +275,27 @@ fn read_chain(
 fn write_chain(
     chain: &Arc<RwLock<Chain>>,
 ) -> Result<std::sync::RwLockWriteGuard<'_, Chain>, ErrorObjectOwned> {
-    chain
-        .write()
-        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>))
+    chain.write().map_err(|_| {
+        ErrorObjectOwned::owned(-32603, "internal error: chain lock poisoned", None::<()>)
+    })
 }
 
 /// Helper: acquire a read lock on the tx pool, returning a JSON-RPC internal error on lock poisoning.
 fn read_txpool(
     txpool: &Arc<RwLock<TxPool>>,
 ) -> Result<std::sync::RwLockReadGuard<'_, TxPool>, ErrorObjectOwned> {
-    txpool
-        .read()
-        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>))
+    txpool.read().map_err(|_| {
+        ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>)
+    })
 }
 
 /// Helper: acquire a write lock on the tx pool, returning a JSON-RPC internal error on lock poisoning.
 fn write_txpool(
     txpool: &Arc<RwLock<TxPool>>,
 ) -> Result<std::sync::RwLockWriteGuard<'_, TxPool>, ErrorObjectOwned> {
-    txpool
-        .write()
-        .map_err(|_| ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>))
+    txpool.write().map_err(|_| {
+        ErrorObjectOwned::owned(-32603, "internal error: txpool lock poisoned", None::<()>)
+    })
 }
 
 /// Shared state accessible by RPC handlers.
@@ -364,8 +370,12 @@ impl VttApiServer for VttRpcImpl {
             head_hash: chain.head_hash().unwrap_or(H256::ZERO),
             validator_count: vs.len(),
             total_stake: vs.total_stake(),
-            total_burned: Amount::from_raw(self.state.total_burned_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15)),
-            total_minted: Amount::from_raw(self.state.total_minted_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15)),
+            total_burned: Amount::from_raw(
+                self.state.total_burned_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15),
+            ),
+            total_minted: Amount::from_raw(
+                self.state.total_minted_milli.load(Ordering::Relaxed) as u128 * 10u128.pow(15),
+            ),
         })
     }
 
@@ -505,11 +515,10 @@ impl VttApiServer for VttRpcImpl {
         drop(chain);
 
         let mut pool = write_txpool(&self.state.txpool)?;
-        pool.add(tx, sender, account_nonce)
-            .map_err(|e| {
-                debug!("pool add failed for {sender}: {e}");
-                ErrorObjectOwned::owned(-32603, "Pool operation failed", None::<()>)
-            })?;
+        pool.add(tx, sender, account_nonce).map_err(|e| {
+            debug!("pool add failed for {sender}: {e}");
+            ErrorObjectOwned::owned(-32603, "Pool operation failed", None::<()>)
+        })?;
 
         Ok(tx_hash)
     }
@@ -653,13 +662,18 @@ impl VttApiServer for VttRpcImpl {
         a_to_b: bool,
     ) -> Result<SwapQuoteRpc, ErrorObjectOwned> {
         let amount_in_u128: u128 = amount_in.parse().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "invalid amount_in: expected decimal u128", None::<()>)
+            ErrorObjectOwned::owned(
+                -32602,
+                "invalid amount_in: expected decimal u128",
+                None::<()>,
+            )
         })?;
 
         let chain = read_chain(&self.state.chain)?;
-        let data = chain.state().get_pool_raw(&pool_id).ok_or_else(|| {
-            ErrorObjectOwned::owned(-32602, "pool not found", None::<()>)
-        })?;
+        let data = chain
+            .state()
+            .get_pool_raw(&pool_id)
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "pool not found", None::<()>))?;
         let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
             ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
         })?;
@@ -673,20 +687,25 @@ impl VttApiServer for VttRpcImpl {
         let (amount_in_net, _lp_fee, _protocol_fee) =
             vtt_dex::math::calculate_fees(amount_in_u128, pool.fee_bps, pool.protocol_fee_bps)
                 .map_err(|e| {
-                    ErrorObjectOwned::owned(-32603, format!("fee calculation error: {e}"), None::<()>)
+                    ErrorObjectOwned::owned(
+                        -32603,
+                        format!("fee calculation error: {e}"),
+                        None::<()>,
+                    )
                 })?;
 
         // total_fee = lp_fee + protocol_fee, already captured as amount_in - amount_in_net
         let total_fee = amount_in_u128.saturating_sub(amount_in_net);
 
-        let amount_out =
-            vtt_dex::math::get_amount_out(amount_in_net, reserve_in, reserve_out).map_err(|e| {
+        let amount_out = vtt_dex::math::get_amount_out(amount_in_net, reserve_in, reserve_out)
+            .map_err(|e| {
                 ErrorObjectOwned::owned(-32603, format!("swap quote error: {e}"), None::<()>)
             })?;
 
         // Price impact in bps: (amount_in_net / reserve_in) * 10000
         let price_impact_bps = if reserve_in > 0 {
-            ((amount_in_net as u64).saturating_mul(10_000) / reserve_in.min(u64::MAX as u128) as u64) as u32
+            ((amount_in_net as u64).saturating_mul(10_000)
+                / reserve_in.min(u64::MAX as u128) as u64) as u32
         } else {
             0
         };
@@ -729,7 +748,11 @@ impl VttApiServer for VttRpcImpl {
                 for tx in &block.transactions {
                     let tx_hash = blake3_hash(&tx.payload_bytes());
                     if tx_hash == hash {
-                        return Ok(Some(tx_to_info(tx, block.header.number, block.header.timestamp)));
+                        return Ok(Some(tx_to_info(
+                            tx,
+                            block.header.number,
+                            block.header.timestamp,
+                        )));
                     }
                 }
             }
@@ -780,9 +803,7 @@ impl VttApiServer for VttRpcImpl {
             .map(proposal_to_info))
     }
 
-    async fn get_bridge_withdrawals(
-        &self,
-    ) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned> {
+    async fn get_bridge_withdrawals(&self) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned> {
         use vtt_primitives::transaction::TransactionAction;
 
         let chain = read_chain(&self.state.chain)?;
@@ -870,29 +891,49 @@ impl VttApiServer for VttRpcImpl {
             None => Ok(None),
             Some(data) => {
                 let p = borsh::from_slice::<Proposal>(data).map_err(|e| {
-                    ErrorObjectOwned::owned(-32603, format!("proposal deserialize: {e}"), None::<()>)
+                    ErrorObjectOwned::owned(
+                        -32603,
+                        format!("proposal deserialize: {e}"),
+                        None::<()>,
+                    )
                 })?;
                 Ok(Some(gov_proposal_to_info(&p)))
             }
         }
     }
 
-    async fn get_block_range(&self, from: u64, count: u64) -> Result<Vec<BlockInfo>, ErrorObjectOwned> {
+    async fn get_block_range(
+        &self,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<BlockInfo>, ErrorObjectOwned> {
         let count = count.min(100);
         let chain = read_chain(&self.state.chain)?;
         let mut blocks = Vec::with_capacity(count as usize);
         for n in from..from.saturating_add(count) {
             if let Some(block) = chain.get_block_by_number(n) {
                 let hash = blake3_hash(&block.header.signable_bytes());
-                blocks.push(BlockInfo::from_header(&block.header, hash, block.tx_count()));
+                blocks.push(BlockInfo::from_header(
+                    &block.header,
+                    hash,
+                    block.tx_count(),
+                ));
             }
         }
         Ok(blocks)
     }
 
-    async fn get_asset_balances(&self, address: Address, asset_ids: Vec<H256>) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned> {
+    async fn get_asset_balances(
+        &self,
+        address: Address,
+        asset_ids: Vec<H256>,
+    ) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned> {
         if asset_ids.len() > 100 {
-            return Err(ErrorObjectOwned::owned(-32602, "too many asset_ids (max 100)", None::<()>));
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "too many asset_ids (max 100)",
+                None::<()>,
+            ));
         }
         let chain = read_chain(&self.state.chain)?;
         let mut balances = Vec::with_capacity(asset_ids.len());
@@ -957,78 +998,178 @@ fn tx_to_info(
     let hash = blake3_hash(&tx.payload_bytes());
     let from = vtt_crypto::address_from_public_key(&tx.public_key);
 
-    let (action_type, to, amount, swap_pool_id, swap_token_in, swap_min_out) = match &tx.payload.action {
-        TransactionAction::Transfer { to, amount } => {
-            ("Transfer".to_string(), Some(*to), *amount, None, None, None)
-        }
-        TransactionAction::Stake { validator, amount } => {
-            ("Stake".to_string(), Some(*validator), *amount, None, None, None)
-        }
-        TransactionAction::Unstake { validator, amount } => {
-            ("Unstake".to_string(), Some(*validator), *amount, None, None, None)
-        }
-        TransactionAction::AssetTransfer { to, amount, .. } => {
-            ("AssetTransfer".to_string(), Some(*to), *amount, None, None, None)
-        }
-        TransactionAction::DeployContract { .. } => {
-            ("DeployContract".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::CallContract { contract, value, .. } => {
-            ("CallContract".to_string(), Some(*contract), *value, None, None, None)
-        }
-        TransactionAction::GovernanceVote { .. } => {
-            ("GovernanceVote".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::CreateAssetClass { total_supply, .. } => {
-            ("CreateAssetClass".to_string(), None, *total_supply, None, None, None)
-        }
-        TransactionAction::CrossChainTransfer { to, .. } => {
-            ("CrossChainTransfer".to_string(), Some(*to), Amount::ZERO, None, None, None)
-        }
-        TransactionAction::CreatePool { amount_a, .. } => {
-            ("CreatePool".to_string(), None, *amount_a, None, None, None)
-        }
-        TransactionAction::AddLiquidity { amount_a, .. } => {
-            ("AddLiquidity".to_string(), None, *amount_a, None, None, None)
-        }
-        TransactionAction::RemoveLiquidity { lp_amount, .. } => {
-            ("RemoveLiquidity".to_string(), None, *lp_amount, None, None, None)
-        }
-        TransactionAction::Swap { pool_id, token_in, amount_in, min_amount_out } => {
-            (
+    let (action_type, to, amount, swap_pool_id, swap_token_in, swap_min_out) =
+        match &tx.payload.action {
+            TransactionAction::Transfer { to, amount } => {
+                ("Transfer".to_string(), Some(*to), *amount, None, None, None)
+            }
+            TransactionAction::Stake { validator, amount } => (
+                "Stake".to_string(),
+                Some(*validator),
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::Unstake { validator, amount } => (
+                "Unstake".to_string(),
+                Some(*validator),
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::AssetTransfer { to, amount, .. } => (
+                "AssetTransfer".to_string(),
+                Some(*to),
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::DeployContract { .. } => (
+                "DeployContract".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::CallContract {
+                contract, value, ..
+            } => (
+                "CallContract".to_string(),
+                Some(*contract),
+                *value,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::GovernanceVote { .. } => (
+                "GovernanceVote".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::CreateAssetClass { total_supply, .. } => (
+                "CreateAssetClass".to_string(),
+                None,
+                *total_supply,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::CrossChainTransfer { to, .. } => (
+                "CrossChainTransfer".to_string(),
+                Some(*to),
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::CreatePool { amount_a, .. } => {
+                ("CreatePool".to_string(), None, *amount_a, None, None, None)
+            }
+            TransactionAction::AddLiquidity { amount_a, .. } => (
+                "AddLiquidity".to_string(),
+                None,
+                *amount_a,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::RemoveLiquidity { lp_amount, .. } => (
+                "RemoveLiquidity".to_string(),
+                None,
+                *lp_amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::Swap {
+                pool_id,
+                token_in,
+                amount_in,
+                min_amount_out,
+            } => (
                 "Swap".to_string(),
                 None,
                 *amount_in,
                 Some(hex::encode(pool_id.as_bytes())),
                 Some(hex::encode(token_in.as_bytes())),
                 Some(*min_amount_out),
-            )
-        }
-        TransactionAction::ClaimRevenue { .. } => {
-            ("ClaimRevenue".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::ClaimMiningRewards { .. } => {
-            ("ClaimMiningRewards".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::DistributeRevenue { total_amount, .. } => {
-            ("DistributeRevenue".to_string(), None, *total_amount, None, None, None)
-        }
-        TransactionAction::ProposeAssetAction { .. } => {
-            ("ProposeAssetAction".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::VoteAssetProposal { .. } => {
-            ("VoteAssetProposal".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::FinalizeAssetProposal { .. } => {
-            ("FinalizeAssetProposal".to_string(), None, Amount::ZERO, None, None, None)
-        }
-        TransactionAction::BridgeWithdraw { destination_address, amount, .. } => {
-            ("BridgeWithdraw".to_string(), Some(*destination_address), *amount, None, None, None)
-        }
-        TransactionAction::GovernancePropose { .. } => {
-            ("GovernancePropose".to_string(), None, Amount::ZERO, None, None, None)
-        }
-    };
+            ),
+            TransactionAction::ClaimRevenue { .. } => (
+                "ClaimRevenue".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::ClaimMiningRewards { .. } => (
+                "ClaimMiningRewards".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::DistributeRevenue { total_amount, .. } => (
+                "DistributeRevenue".to_string(),
+                None,
+                *total_amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::ProposeAssetAction { .. } => (
+                "ProposeAssetAction".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::VoteAssetProposal { .. } => (
+                "VoteAssetProposal".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::FinalizeAssetProposal { .. } => (
+                "FinalizeAssetProposal".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::BridgeWithdraw {
+                destination_address,
+                amount,
+                ..
+            } => (
+                "BridgeWithdraw".to_string(),
+                Some(*destination_address),
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::GovernancePropose { .. } => (
+                "GovernancePropose".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+        };
 
     TransactionInfo {
         hash,
@@ -1179,9 +1320,7 @@ impl RpcServer {
 
         // Order: body_limit is innermost (applied first to the service),
         // CORS is outermost (applied last, intercepts preflight OPTIONS before body limit).
-        let middleware = tower::ServiceBuilder::new()
-            .layer(body_limit)
-            .layer(cors);
+        let middleware = tower::ServiceBuilder::new().layer(body_limit).layer(cors);
 
         let server = Server::builder()
             .set_http_middleware(middleware)

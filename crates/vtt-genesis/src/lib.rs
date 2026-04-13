@@ -78,16 +78,43 @@ impl GenesisConfig {
                 .unwrap()
                 .as_millis() as u64,
             allocations: vec![
-                GenesisAllocation { address: val1, balance: Amount::from_vtt(600_000) },
-                GenesisAllocation { address: val2, balance: Amount::from_vtt(600_000) },
-                GenesisAllocation { address: val3, balance: Amount::from_vtt(600_000) },
-                GenesisAllocation { address: faucet1, balance: Amount::from_vtt(1_000_000) },
-                GenesisAllocation { address: faucet2, balance: Amount::from_vtt(1_000_000) },
+                GenesisAllocation {
+                    address: val1,
+                    balance: Amount::from_vtt(600_000),
+                },
+                GenesisAllocation {
+                    address: val2,
+                    balance: Amount::from_vtt(600_000),
+                },
+                GenesisAllocation {
+                    address: val3,
+                    balance: Amount::from_vtt(600_000),
+                },
+                GenesisAllocation {
+                    address: faucet1,
+                    balance: Amount::from_vtt(1_000_000),
+                },
+                GenesisAllocation {
+                    address: faucet2,
+                    balance: Amount::from_vtt(1_000_000),
+                },
             ],
             validators: vec![
-                GenesisValidator { address: val1, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
-                GenesisValidator { address: val2, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
-                GenesisValidator { address: val3, self_stake: Amount::from_vtt(500_000), commission_bps: 500 },
+                GenesisValidator {
+                    address: val1,
+                    self_stake: Amount::from_vtt(500_000),
+                    commission_bps: 500,
+                },
+                GenesisValidator {
+                    address: val2,
+                    self_stake: Amount::from_vtt(500_000),
+                    commission_bps: 500,
+                },
+                GenesisValidator {
+                    address: val3,
+                    self_stake: Amount::from_vtt(500_000),
+                    commission_bps: 500,
+                },
             ],
         }
     }

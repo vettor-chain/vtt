@@ -720,7 +720,11 @@ impl StateDB {
     /// Store a protocol governance proposal (serialized).
     pub fn put_governance_proposal(&mut self, id: H256, data: Vec<u8>) {
         if let Some(ref storage) = self.storage {
-            let _ = storage.put(Column::ChainMeta, &[b"gov:", id.as_bytes().as_slice()].concat(), &data);
+            let _ = storage.put(
+                Column::ChainMeta,
+                &[b"gov:", id.as_bytes().as_slice()].concat(),
+                &data,
+            );
         }
         self.governance_proposals.insert(id, data);
     }
@@ -736,7 +740,10 @@ impl StateDB {
             return Some(data.clone());
         }
         if let Some(ref storage) = self.storage {
-            if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, &[b"gov:", id.as_bytes().as_slice()].concat()) {
+            if let Ok(Some(bytes)) = storage.get(
+                Column::ChainMeta,
+                &[b"gov:", id.as_bytes().as_slice()].concat(),
+            ) {
                 return Some(bytes);
             }
         }
