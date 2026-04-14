@@ -1238,6 +1238,7 @@ fn execute_bridge_withdraw(
 /// Execute governance proposal creation.
 /// The sender must have staked VTT (either as a validator or delegator).
 /// The proposal is persisted in the state DB via GovernanceSystem.
+#[allow(clippy::too_many_arguments)]
 fn execute_governance_propose(
     state: &mut StateDB,
     sender: &Address,
