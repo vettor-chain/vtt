@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use borsh::BorshDeserialize;
 use thiserror::Error;
 use tracing::debug;
