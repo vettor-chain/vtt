@@ -1,6 +1,11 @@
 # VTT Blockchain
 
+[![CI](https://github.com/vettor-chain/vtt/actions/workflows/ci.yml/badge.svg)](https://github.com/vettor-chain/vtt/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 Layer 1 blockchain for tokenizing real-world assets. Built in Rust with DPoS consensus, WASM smart contracts, built-in DEX, cross-chain bridge, and on-chain governance.
+
+[Website](https://testnet.vettor.org) | [Whitepaper](https://testnet.vettor.org/whitepaper) | [Explorer](https://testnet.vettor.org/explorer) | [SDK](https://www.npmjs.com/package/@vettor/sdk)
 
 ## Architecture
 
