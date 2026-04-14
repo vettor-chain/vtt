@@ -830,6 +830,10 @@ fn try_produce_block(
 
     if per_block_reward.raw() > 0 {
         let split = split_block_reward(per_block_reward);
+        // TODO: When delegator reward distribution is implemented, use
+        // split_producer_reward(split.producer, validator.commission_bps) to split
+        // the producer share into validator commission and delegator rewards.
+        // Currently the full producer share goes to the validator address.
         let _ = chain
             .state_mut()
             .add_balance(&validator_addr, split.producer);

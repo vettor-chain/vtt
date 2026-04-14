@@ -49,6 +49,36 @@ pub fn split_block_reward(total_reward: Amount) -> BlockRewardSplit {
     }
 }
 
+/// Split the producer's share between validator commission and delegator rewards.
+///
+/// When a validator has delegators, the producer's 80% block reward should be
+/// further divided: the validator keeps `commission_bps` (basis points, e.g. 500 = 5%),
+/// and the remainder is distributed proportionally to delegators (and the validator's
+/// self-stake).
+///
+/// Currently, reward distribution in the validator node credits the full producer
+/// share to the validator address. Commission splitting will take effect when
+/// per-delegator reward distribution is implemented. This struct and function are
+/// provided so that integration is straightforward.
+pub struct ProducerRewardSplit {
+    /// Commission kept by the validator operator.
+    pub validator_commission: Amount,
+    /// Remainder to be distributed proportionally among all stakers (including self-stake).
+    pub staker_rewards: Amount,
+}
+
+/// Split producer reward applying validator commission.
+///
+/// `commission_bps`: commission rate in basis points (e.g. 500 = 5%).
+pub fn split_producer_reward(producer_reward: Amount, commission_bps: u16) -> ProducerRewardSplit {
+    let commission_raw = producer_reward.raw() * commission_bps as u128 / 10_000;
+    let staker_raw = producer_reward.raw() - commission_raw;
+    ProducerRewardSplit {
+        validator_commission: Amount::from_raw(commission_raw),
+        staker_rewards: Amount::from_raw(staker_raw),
+    }
+}
+
 /// Split gas fees between burning and block producer.
 pub struct GasFeeSplit {
     /// Amount burned (removed from circulation).
@@ -128,5 +158,29 @@ mod tests {
         let split = split_gas_fees(Amount::ZERO);
         assert_eq!(split.burned, Amount::ZERO);
         assert_eq!(split.producer, Amount::ZERO);
+    }
+
+    #[test]
+    fn producer_reward_commission_5pct() {
+        let producer = Amount::from_vtt(80);
+        let split = split_producer_reward(producer, 500); // 5%
+        assert_eq!(split.validator_commission, Amount::from_vtt(4));
+        assert_eq!(split.staker_rewards, Amount::from_vtt(76));
+    }
+
+    #[test]
+    fn producer_reward_zero_commission() {
+        let producer = Amount::from_vtt(80);
+        let split = split_producer_reward(producer, 0);
+        assert_eq!(split.validator_commission, Amount::ZERO);
+        assert_eq!(split.staker_rewards, Amount::from_vtt(80));
+    }
+
+    #[test]
+    fn producer_reward_full_commission() {
+        let producer = Amount::from_vtt(80);
+        let split = split_producer_reward(producer, 10_000); // 100%
+        assert_eq!(split.validator_commission, Amount::from_vtt(80));
+        assert_eq!(split.staker_rewards, Amount::ZERO);
     }
 }
