@@ -5,7 +5,9 @@
 
 Layer 1 blockchain for tokenizing real-world assets. Built in Rust with DPoS consensus, WASM smart contracts, built-in DEX, cross-chain bridge, and on-chain governance.
 
-[Website](https://testnet.vettor.org) | [Whitepaper](https://testnet.vettor.org/whitepaper) | [Explorer](https://testnet.vettor.org/explorer) | [SDK](https://www.npmjs.com/package/@vettor/sdk)
+> Currently in **testnet**. Mainnet launch planned for Q2 2026.
+
+[Testnet Website](https://testnet.vettor.org) | [Whitepaper](https://testnet.vettor.org/whitepaper) | [Testnet Explorer](https://testnet.vettor.org/explorer) | [SDK](https://www.npmjs.com/package/@vettor/sdk)
 
 ## Features
 
@@ -131,6 +133,7 @@ npm install @vettor/sdk
 ```typescript
 import { VttClient, Wallet } from "@vettor/sdk";
 
+// Connect to testnet
 const client = new VttClient("https://testnet.vettor.org/api/rpc");
 const wallet = await Wallet.fromSeed("your-hex-seed");
 
