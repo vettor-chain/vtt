@@ -67,6 +67,8 @@ pub enum TransactionAction {
         symbol: String,
         metadata_uri: String,
         total_supply: Amount,
+        decimals: u8,
+        asset_class: String,
     },
 
     /// Transfer tokenized asset (RWA native).
@@ -313,6 +315,8 @@ mod tests {
                 symbol: "REF".to_string(),
                 metadata_uri: "ipfs://Qm...".to_string(),
                 total_supply: Amount::from_vtt(1_000_000),
+                decimals: 18,
+                asset_class: "real_estate".to_string(),
             },
             TransactionAction::AssetTransfer {
                 asset_id: H256::ZERO,

@@ -162,6 +162,8 @@ fn asset_tokenization_lifecycle() {
             symbol: "TRE".to_string(),
             metadata_uri: "ipfs://test".to_string(),
             total_supply: Amount::from_vtt(1_000_000),
+            decimals: 18,
+            asset_class: "real_estate".to_string(),
         },
     );
 
@@ -378,6 +380,8 @@ fn dex_swap_lifecycle() {
             symbol: "vUSDT".to_string(),
             metadata_uri: "ipfs://vusdt".to_string(),
             total_supply: asset_supply,
+            decimals: 6,
+            asset_class: "custom".to_string(),
         },
     );
 

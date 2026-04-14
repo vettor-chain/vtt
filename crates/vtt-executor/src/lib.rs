@@ -308,8 +308,20 @@ fn execute_action(
             symbol,
             metadata_uri,
             total_supply,
+            decimals,
+            asset_class,
         } => {
-            execute_create_asset(state, sender, name, symbol, metadata_uri, *total_supply)?;
+            execute_create_asset(
+                state,
+                sender,
+                name,
+                symbol,
+                metadata_uri,
+                *total_supply,
+                *decimals,
+                asset_class,
+                block_number,
+            )?;
             Ok(vec![Log {
                 address: *sender,
                 topics: vec![blake3_hash(b"CreateAssetClass")],
@@ -853,26 +865,41 @@ fn execute_create_asset(
     symbol: &str,
     metadata_uri: &str,
     total_supply: Amount,
+    decimals: u8,
+    asset_class: &str,
+    block_number: u64,
 ) -> Result<(), ExecutionError> {
     // Generate a deterministic asset ID from sender + name + symbol
     let id_data = borsh::to_vec(&(*sender, name, symbol)).unwrap();
     let asset_id = blake3_hash(&id_data);
 
+    let class = match asset_class {
+        "equity" => AssetClass::Equity,
+        "debt" => AssetClass::Debt,
+        "real_estate" => AssetClass::RealEstate,
+        "commodity" => AssetClass::Commodity,
+        "fund" => AssetClass::Fund,
+        "ip" => AssetClass::IntellectualProperty,
+        "carbon" => AssetClass::CarbonCredit,
+        "invoice" => AssetClass::Invoice,
+        _ => AssetClass::Custom(asset_class.to_string()),
+    };
+
     let asset = AssetRecord {
         id: asset_id,
         name: name.to_string(),
         symbol: symbol.to_string(),
-        class: AssetClass::Custom("General".to_string()),
+        class,
         origin_chain: ChainId::RELAY,
         issuer: *sender,
         total_supply,
-        decimals: 18,
+        decimals,
         status: AssetStatus::Active,
         compliance_policy: None,
         valuation_oracle: None,
         documents: std::collections::BTreeMap::new(),
         metadata_uri: metadata_uri.to_string(),
-        created_at: 0,
+        created_at: block_number,
     };
 
     state.register_asset(asset)?;
@@ -1370,11 +1397,19 @@ fn execute_governance_vote(
 
     // Get sender's voting power (staked VTT)
     let sender_account = state.get_account(sender);
-    let voting_power = match &sender_account.staking {
+    let voter_stake = match &sender_account.staking {
         Some(staking) if !staking.total_stake.is_zero() => staking.total_stake,
         _ => {
             return Err(ExecutionError::Custom("no staked VTT to vote with".into()));
         }
+    };
+
+    // Cap vote weight: can't vote with more than existed at proposal creation.
+    // This prevents vote manipulation by buying stake after a proposal is created.
+    let voting_power = if !proposal.total_staked_at_creation.is_zero() {
+        voter_stake.min(proposal.total_staked_at_creation)
+    } else {
+        voter_stake // backwards compat for proposals without snapshot
     };
 
     // Apply vote
