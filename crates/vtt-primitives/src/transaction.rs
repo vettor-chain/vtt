@@ -158,8 +158,16 @@ pub enum TransactionAction {
     GovernancePropose {
         /// Human-readable description of the proposal.
         description: String,
-        /// Type of proposal: "parameter_change", "treasury_spend", "signal".
+        /// Type of proposal: "parameter_change", "treasury_spend", "signal", "dex_pause", "dex_unpause".
         action_type: String,
+        /// Parameter key (for parameter_change proposals).
+        param_key: Option<String>,
+        /// Parameter value (for parameter_change proposals).
+        param_value: Option<String>,
+        /// Recipient address (for treasury_spend proposals).
+        recipient: Option<Address>,
+        /// Amount (for treasury_spend proposals).
+        amount: Option<Amount>,
     },
 }
 
@@ -345,6 +353,10 @@ mod tests {
             TransactionAction::GovernancePropose {
                 description: "Reduce block time".to_string(),
                 action_type: "parameter_change".to_string(),
+                param_key: Some("block_time_ms".to_string()),
+                param_value: Some("2000".to_string()),
+                recipient: None,
+                amount: None,
             },
         ];
 

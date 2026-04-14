@@ -948,15 +948,27 @@ impl VttApiServer for VttRpcImpl {
 fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo {
     use vtt_consensus::governance::{ProposalAction, ProposalStatus};
 
-    let action_type = match &p.action {
-        ProposalAction::ParameterChange { .. } => "ParameterChange",
-        ProposalAction::RegisterChain { .. } => "RegisterChain",
-        ProposalAction::TreasurySpend { .. } => "TreasurySpend",
-        ProposalAction::ProtocolUpgrade { .. } => "ProtocolUpgrade",
-        ProposalAction::DexPause(true) => "DexPause",
-        ProposalAction::DexPause(false) => "DexUnpause",
-    }
-    .to_string();
+    let (action_type, action_detail) = match &p.action {
+        ProposalAction::ParameterChange { key, value } => {
+            ("ParameterChange", Some(format!("{} = {}", key, value)))
+        }
+        ProposalAction::RegisterChain { name, .. } => {
+            ("RegisterChain", Some(format!("chain: {}", name)))
+        }
+        ProposalAction::TreasurySpend { recipient, amount } => (
+            "TreasurySpend",
+            Some(format!("{} VTT to {}", amount, recipient)),
+        ),
+        ProposalAction::ProtocolUpgrade {
+            version,
+            description,
+        } => (
+            "ProtocolUpgrade",
+            Some(format!("v{}: {}", version, description)),
+        ),
+        ProposalAction::DexPause(true) => ("DexPause", Some("paused: true".to_string())),
+        ProposalAction::DexPause(false) => ("DexUnpause", Some("paused: false".to_string())),
+    };
 
     let status = match &p.status {
         ProposalStatus::Active => "active",
@@ -971,13 +983,14 @@ fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo
         id: p.id,
         proposer: p.proposer,
         description: p.description.clone(),
-        action_type,
+        action_type: action_type.to_string(),
         status,
         votes_yes: p.votes_yes,
         votes_no: p.votes_no,
         votes_abstain: p.votes_abstain,
         created_at: p.created_at,
         voting_end: p.voting_end,
+        action_detail,
     }
 }
 

@@ -275,6 +275,9 @@ pub struct ProposalInfo {
     pub votes_abstain: Amount,
     pub created_at: BlockNumber,
     pub voting_end: BlockNumber,
+    /// Human-readable detail of the proposal action (e.g. treasury amount, parameter key=value).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_detail: Option<String>,
 }
 
 /// RPC response for bridge withdrawal events (used by the relayer).

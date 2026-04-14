@@ -545,9 +545,22 @@ fn execute_action(
         TransactionAction::GovernancePropose {
             description,
             action_type,
-        } => {
-            execute_governance_propose(state, sender, description, action_type, block_number, nonce)
-        }
+            param_key,
+            param_value,
+            recipient,
+            amount,
+        } => execute_governance_propose(
+            state,
+            sender,
+            description,
+            action_type,
+            param_key.as_deref(),
+            param_value.as_deref(),
+            recipient.as_ref(),
+            amount.as_ref(),
+            block_number,
+            nonce,
+        ),
     }
 }
 
@@ -1230,6 +1243,10 @@ fn execute_governance_propose(
     sender: &Address,
     description: &str,
     action_type: &str,
+    param_key: Option<&str>,
+    param_value: Option<&str>,
+    recipient: Option<&Address>,
+    amount: Option<&Amount>,
     block_number: u64,
     _nonce: u64,
 ) -> Result<Vec<Log>, ExecutionError> {
@@ -1239,16 +1256,21 @@ fn execute_governance_propose(
         ));
     }
 
-    // Validate action_type and map to ProposalAction
+    // Validate action_type and map to ProposalAction using the real parameters
     let action = match action_type {
-        "parameter_change" => ProposalAction::ParameterChange {
-            key: String::new(),
-            value: description.to_string(),
-        },
-        "treasury_spend" => ProposalAction::TreasurySpend {
-            recipient: Address::ZERO,
-            amount: Amount::ZERO,
-        },
+        "parameter_change" => {
+            let key = param_key.unwrap_or_default().to_string();
+            let value = param_value.unwrap_or(description).to_string();
+            ProposalAction::ParameterChange { key, value }
+        }
+        "treasury_spend" => {
+            let recv = recipient.copied().unwrap_or(Address::ZERO);
+            let amt = amount.copied().unwrap_or(Amount::ZERO);
+            ProposalAction::TreasurySpend {
+                recipient: recv,
+                amount: amt,
+            }
+        }
         "signal" => ProposalAction::ProtocolUpgrade {
             version: 0,
             description: description.to_string(),
