@@ -89,11 +89,11 @@ pub struct AssetRecord {
     pub decimals: u8,
     /// Current lifecycle status.
     pub status: AssetStatus,
-    /// Compliance policy contract address (optional).
+    /// Compliance contract address. Reserved for future implementation.
     pub compliance_policy: Option<Address>,
-    /// Oracle feed for valuation (optional).
+    /// Valuation oracle feed ID. Reserved for future implementation.
     pub valuation_oracle: Option<H256>,
-    /// Legal document hashes.
+    /// Document attachments. Reserved for future implementation.
     pub documents: BTreeMap<DocumentType, DocumentRecord>,
     /// Metadata URI (IPFS, etc.).
     pub metadata_uri: String,
@@ -131,6 +131,16 @@ impl AssetRecord {
     /// Activate the asset (from Draft).
     pub fn activate(&mut self) -> bool {
         if self.status == AssetStatus::Draft {
+            self.status = AssetStatus::Active;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Unfreeze the asset (from Frozen back to Active).
+    pub fn unfreeze(&mut self) -> bool {
+        if self.status == AssetStatus::Frozen {
             self.status = AssetStatus::Active;
             true
         } else {

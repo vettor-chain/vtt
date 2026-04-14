@@ -28,6 +28,8 @@ pub enum ProposalAction {
     ProtocolUpgrade { version: u32, description: String },
     /// Pause or unpause the DEX.
     DexPause(bool),
+    /// Pause or unpause the bridge.
+    BridgePause(bool),
 }
 
 /// Status of a governance proposal.
@@ -35,7 +37,8 @@ pub enum ProposalAction {
 pub enum ProposalStatus {
     /// Voting is open.
     Active,
-    /// Passed quorum and threshold — ready to execute.
+    /// Reserved -- not currently used in the lifecycle (Active -> Queued -> Executed).
+    /// Kept for Borsh serialization compatibility.
     Passed,
     /// Queued for execution after timelock expires.
     Queued { execute_after: u64 },

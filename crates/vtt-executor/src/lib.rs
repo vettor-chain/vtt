@@ -4,7 +4,7 @@ use borsh::BorshDeserialize;
 use thiserror::Error;
 use tracing::debug;
 
-use vtt_consensus::governance::{GovernanceSystem, Proposal, ProposalAction};
+use vtt_consensus::governance::{Proposal, ProposalAction};
 use vtt_crypto::{blake3_hash, verify};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::asset_governance::{
@@ -41,6 +41,12 @@ pub enum ExecutionError {
     UnstakeExceedsStake { staked: Amount, requested: Amount },
     #[error("contract too large: {size} bytes (max {max})")]
     ContractTooLarge { size: usize, max: usize },
+    #[error("bridge is paused")]
+    BridgePaused,
+    #[error("asset not found")]
+    AssetNotFound,
+    #[error("sender is not the asset issuer")]
+    NotIssuer,
     #[error("{0}")]
     Custom(String),
 }
@@ -575,6 +581,14 @@ fn execute_action(
             block_number,
             nonce,
         ),
+
+        TransactionAction::FreezeAsset { asset_id } => {
+            execute_freeze_asset(state, sender, asset_id)
+        }
+
+        TransactionAction::UnfreezeAsset { asset_id } => {
+            execute_unfreeze_asset(state, sender, asset_id)
+        }
     }
 }
 
@@ -1223,6 +1237,48 @@ fn execute_finalize_asset_proposal(
     }])
 }
 
+/// Execute an asset freeze (only the issuer can freeze).
+fn execute_freeze_asset(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+) -> Result<Vec<Log>, ExecutionError> {
+    let mut asset = state
+        .get_asset_owned(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    if asset.issuer != *sender {
+        return Err(ExecutionError::NotIssuer);
+    }
+    asset.freeze();
+    state.put_asset(asset_id, &asset);
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"FreezeAsset"), *asset_id],
+        data: borsh::to_vec(&(*sender, *asset_id)).unwrap(),
+    }])
+}
+
+/// Execute an asset unfreeze (only the issuer can unfreeze).
+fn execute_unfreeze_asset(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+) -> Result<Vec<Log>, ExecutionError> {
+    let mut asset = state
+        .get_asset_owned(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    if asset.issuer != *sender {
+        return Err(ExecutionError::NotIssuer);
+    }
+    asset.unfreeze();
+    state.put_asset(asset_id, &asset);
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"UnfreezeAsset"), *asset_id],
+        data: borsh::to_vec(&(*sender, *asset_id)).unwrap(),
+    }])
+}
+
 /// Execute a bridge withdrawal: burn tokens on VTT chain.
 /// A backend relayer watches for these logs and releases tokens on the destination chain.
 fn execute_bridge_withdraw(
@@ -1233,6 +1289,10 @@ fn execute_bridge_withdraw(
     destination_chain: u32,
     destination_address: &Address,
 ) -> Result<Vec<Log>, ExecutionError> {
+    if state.is_bridge_paused() {
+        return Err(ExecutionError::BridgePaused);
+    }
+
     if amount.is_zero() {
         return Err(ExecutionError::Custom(
             "bridge withdraw amount must be non-zero".into(),
@@ -1266,7 +1326,7 @@ fn execute_bridge_withdraw(
 
 /// Execute governance proposal creation.
 /// The sender must have staked VTT (either as a validator or delegator).
-/// The proposal is persisted in the state DB via GovernanceSystem.
+/// The proposal is persisted directly in the state DB.
 #[allow(clippy::too_many_arguments)]
 fn execute_governance_propose(
     state: &mut StateDB,
@@ -1307,9 +1367,16 @@ fn execute_governance_propose(
         },
         "dex_pause" => ProposalAction::DexPause(true),
         "dex_unpause" => ProposalAction::DexPause(false),
+        "bridge_pause" => ProposalAction::BridgePause(true),
+        "bridge_unpause" => ProposalAction::BridgePause(false),
+        "register_chain" => {
+            let name = param_key.unwrap_or("").to_string();
+            let config_json = param_value.unwrap_or("{}").to_string();
+            ProposalAction::RegisterChain { name, config_json }
+        }
         other => {
             return Err(ExecutionError::Custom(format!(
-                "invalid action_type '{}', must be one of: parameter_change, treasury_spend, signal, dex_pause, dex_unpause",
+                "invalid action_type '{}', must be one of: parameter_change, treasury_spend, signal, dex_pause, dex_unpause, bridge_pause, bridge_unpause, register_chain",
                 other
             )));
         }
@@ -1334,24 +1401,26 @@ fn execute_governance_propose(
         .filter_map(|(_, acc)| acc.staking.as_ref())
         .fold(Amount::ZERO, |sum, s| sum + s.total_stake);
 
-    // Create proposal via GovernanceSystem
-    let mut gov = GovernanceSystem::new();
+    // Generate a unique, persistent proposal ID using the governance counter
+    let gov_seq = state.next_governance_id();
+    let id_data = borsh::to_vec(&(gov_seq, sender, block_number)).unwrap();
+    let proposal_id = blake3_hash(&id_data);
 
-    // Load existing proposals from state (reconstitute system from stored proposals)
-    // For proposal creation we only need the system to generate a unique ID
-    let proposal_id = gov.create_proposal(
-        *sender,
+    let proposal = Proposal {
+        id: proposal_id,
+        proposer: *sender,
         action,
-        description.to_string(),
-        block_number,
-        total_staked,
-    );
-
-    // Serialize and store the proposal in state
-    let proposal = gov
-        .get(&proposal_id)
-        .ok_or_else(|| ExecutionError::Custom("governance proposal creation failed".into()))?
-        .clone();
+        description: description.to_string(),
+        created_at: block_number,
+        voting_end: block_number + vtt_consensus::governance::VOTING_PERIOD_BLOCKS,
+        status: vtt_consensus::governance::ProposalStatus::Active,
+        votes_yes: Amount::ZERO,
+        votes_no: Amount::ZERO,
+        votes_abstain: Amount::ZERO,
+        voters: Vec::new(),
+        snapshot_block: block_number,
+        total_staked_at_creation: total_staked,
+    };
     let proposal_bytes = borsh::to_vec(&proposal)
         .map_err(|e| ExecutionError::Custom(format!("proposal serialization failed: {e}")))?;
     state.put_governance_proposal(proposal_id, proposal_bytes);
@@ -1485,6 +1554,8 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::FinalizeAssetProposal { .. } => 100_000,
         TransactionAction::BridgeWithdraw { .. } => 50_000,
         TransactionAction::GovernancePropose { .. } => 100_000,
+        TransactionAction::FreezeAsset { .. } => 30_000,
+        TransactionAction::UnfreezeAsset { .. } => 30_000,
     }
 }
 
@@ -1636,6 +1707,13 @@ pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 
                 debug!(
                     ?proposal_id,
                     paused, "DEX pause state updated via governance"
+                );
+            }
+            ProposalAction::BridgePause(paused) => {
+                state.set_bridge_paused(*paused);
+                debug!(
+                    ?proposal_id,
+                    paused, "bridge pause state updated via governance"
                 );
             }
         }

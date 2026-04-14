@@ -968,6 +968,8 @@ fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo
         ),
         ProposalAction::DexPause(true) => ("DexPause", Some("paused: true".to_string())),
         ProposalAction::DexPause(false) => ("DexUnpause", Some("paused: false".to_string())),
+        ProposalAction::BridgePause(true) => ("BridgePause", Some("paused: true".to_string())),
+        ProposalAction::BridgePause(false) => ("BridgeUnpause", Some("paused: false".to_string())),
     };
 
     let status = match &p.status {
@@ -1170,6 +1172,22 @@ fn tx_to_info(
             ),
             TransactionAction::GovernancePropose { .. } => (
                 "GovernancePropose".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::FreezeAsset { .. } => (
+                "FreezeAsset".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::UnfreezeAsset { .. } => (
+                "UnfreezeAsset".to_string(),
                 None,
                 Amount::ZERO,
                 None,

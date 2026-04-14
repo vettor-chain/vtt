@@ -650,6 +650,60 @@ impl StateDB {
         self.dex_paused = paused;
     }
 
+    /// Check whether the bridge is paused.
+    pub fn is_bridge_paused(&self) -> bool {
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(v)) = storage.get(Column::ChainMeta, b"bridge:paused") {
+                return v == [1u8];
+            }
+        }
+        false
+    }
+
+    /// Set the bridge paused state (controlled via governance).
+    pub fn set_bridge_paused(&mut self, paused: bool) {
+        if let Some(ref storage) = self.storage {
+            let val = if paused { [1u8] } else { [0u8] };
+            let _ = storage.put(Column::ChainMeta, b"bridge:paused", &val);
+        }
+    }
+
+    /// Get the next governance proposal ID and atomically increment the counter.
+    /// The counter is persisted in ChainMeta storage so IDs are unique across blocks.
+    pub fn next_governance_id(&mut self) -> u64 {
+        let key = b"governance:next_id";
+        let current = if let Some(ref storage) = self.storage {
+            storage
+                .get(Column::ChainMeta, key)
+                .ok()
+                .flatten()
+                .map(|v| {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&v);
+                    u64::from_be_bytes(bytes)
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let next = current + 1;
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, key, &next.to_be_bytes());
+        }
+        current
+    }
+
+    /// Update an existing asset record in the registry.
+    pub fn put_asset(&mut self, asset_id: &H256, asset: &AssetRecord) {
+        self.dirty_assets.push(*asset_id);
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(asset) {
+                let _ = storage.put(Column::Assets, asset_id.as_bytes(), &bytes);
+            }
+        }
+        self.assets.insert(*asset_id, asset.clone());
+    }
+
     // --- Slashing Methods ---
 
     /// Apply a slash to a validator's stake. Reduces total_stake and self_stake by the

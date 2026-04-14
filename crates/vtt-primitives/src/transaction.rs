@@ -160,7 +160,7 @@ pub enum TransactionAction {
     GovernancePropose {
         /// Human-readable description of the proposal.
         description: String,
-        /// Type of proposal: "parameter_change", "treasury_spend", "signal", "dex_pause", "dex_unpause".
+        /// Type of proposal: "parameter_change", "treasury_spend", "signal", "dex_pause", "dex_unpause", "bridge_pause", "bridge_unpause", "register_chain".
         action_type: String,
         /// Parameter key (for parameter_change proposals).
         param_key: Option<String>,
@@ -170,6 +170,16 @@ pub enum TransactionAction {
         recipient: Option<Address>,
         /// Amount (for treasury_spend proposals).
         amount: Option<Amount>,
+    },
+
+    /// Freeze a tokenized asset (only the issuer can call this).
+    FreezeAsset {
+        asset_id: H256,
+    },
+
+    /// Unfreeze a previously frozen asset (only the issuer can call this).
+    UnfreezeAsset {
+        asset_id: H256,
     },
 }
 
@@ -361,6 +371,12 @@ mod tests {
                 param_value: Some("2000".to_string()),
                 recipient: None,
                 amount: None,
+            },
+            TransactionAction::FreezeAsset {
+                asset_id: H256::from([0xAA; 32]),
+            },
+            TransactionAction::UnfreezeAsset {
+                asset_id: H256::from([0xAA; 32]),
             },
         ];
 
