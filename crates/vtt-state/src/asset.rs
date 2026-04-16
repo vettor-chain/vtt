@@ -126,6 +126,10 @@ pub struct AssetRecord {
     /// is in RedemptionPending. Holders claim their pro-rata share by calling
     /// ClaimRedemption while their token balance is still on-chain.
     pub redemption_pool: Amount,
+    /// Whether transfers of this asset require both sender and recipient to
+    /// have KYC approval on-chain. Automatically true for regulated classes
+    /// (Equity, Debt, RealEstate, Fund).
+    pub requires_kyc: bool,
     /// Block number at creation.
     pub created_at: u64,
 }
@@ -277,6 +281,7 @@ mod tests {
             transfer_mode: TransferMode::PeerToPeer,
             registrar: None,
             redemption_pool: Amount::ZERO,
+            requires_kyc: false,
             created_at: 100,
         }
     }

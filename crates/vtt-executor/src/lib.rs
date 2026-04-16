@@ -357,11 +357,14 @@ fn execute_action(
             let asset = state
                 .get_asset(asset_id)
                 .ok_or(ExecutionError::AssetNotFound)?;
+            let requires_kyc = asset.requires_kyc;
+            let transfer_mode = asset.transfer_mode.clone();
+            let registrar = asset.registrar;
             if matches!(
-                asset.transfer_mode,
+                transfer_mode,
                 vtt_state::asset::TransferMode::RegistrarMediated
             ) {
-                let registrar = asset.registrar.ok_or_else(|| {
+                let registrar = registrar.ok_or_else(|| {
                     ExecutionError::Custom(
                         "asset configured as RegistrarMediated but has no registrar".into(),
                     )
@@ -370,6 +373,18 @@ fn execute_action(
                     return Err(ExecutionError::Custom(
                         "registrar-mediated asset: only the registrar can originate transfers"
                             .into(),
+                    ));
+                }
+            }
+            if requires_kyc {
+                if !state.is_kyc_approved(sender) {
+                    return Err(ExecutionError::Custom(
+                        "sender is not KYC-approved for this regulated asset".into(),
+                    ));
+                }
+                if !state.is_kyc_approved(to) {
+                    return Err(ExecutionError::Custom(
+                        "recipient is not KYC-approved for this regulated asset".into(),
                     ));
                 }
             }
@@ -625,6 +640,10 @@ fn execute_action(
             execute_claim_redemption(state, sender, asset_id)
         }
 
+        TransactionAction::SetKycApproval { address, approved } => {
+            execute_set_kyc_approval(state, sender, address, *approved)
+        }
+
         TransactionAction::BridgeDeposit {
             source_tx_hash,
             source_chain,
@@ -758,6 +777,29 @@ fn execute_claim_redemption(
         address: *sender,
         topics: vec![blake3_hash(b"ClaimRedemption"), *asset_id],
         data: borsh::to_vec(&(*sender, holder_total, share)).unwrap_or_default(),
+    }])
+}
+
+/// Set or clear KYC approval for an address. Only callable by the treasury
+/// address (the on-chain admin). Governance can change the treasury address
+/// via ParameterChange if needed.
+fn execute_set_kyc_approval(
+    state: &mut StateDB,
+    sender: &Address,
+    address: &Address,
+    approved: bool,
+) -> Result<Vec<Log>, ExecutionError> {
+    let treasury = state.get_treasury_address();
+    if *sender != treasury {
+        return Err(ExecutionError::Custom(
+            "only the treasury / admin can set KYC approval".into(),
+        ));
+    }
+    state.set_kyc_approved(address, approved);
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"SetKycApproval")],
+        data: borsh::to_vec(&(*address, approved)).unwrap_or_default(),
     }])
 }
 
@@ -1242,6 +1284,9 @@ fn execute_create_asset(
         transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
         registrar: None,
         redemption_pool: Amount::ZERO,
+        // Regulated classes default to requiring KYC; admin can flip later via
+        // governance if the asset is deployed on a permissionless app chain.
+        requires_kyc: is_regulated,
         created_at: block_number,
     };
 
@@ -1901,6 +1946,7 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::BridgeDeposit { .. } => 80_000,
         TransactionAction::FundRedemptionPool { .. } => 50_000,
         TransactionAction::ClaimRedemption { .. } => 80_000,
+        TransactionAction::SetKycApproval { .. } => 30_000,
     }
 }
 

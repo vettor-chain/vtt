@@ -330,6 +330,7 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
         registrar: None,
         redemption_pool: Amount::ZERO,
+        requires_kyc: false,
         created_at: 0,
     };
     state
@@ -380,6 +381,7 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
         registrar: None,
         redemption_pool: Amount::ZERO,
+        requires_kyc: false,
         created_at: 0,
     };
     state

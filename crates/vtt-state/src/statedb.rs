@@ -60,6 +60,9 @@ pub struct StateDB {
     /// Processed slashing evidence (dedup key: offender + epoch + slot).
     /// Prevents double-slashing from duplicate evidence submissions.
     slashing_seen: HashSet<(Address, u64, u32)>,
+    /// KYC-approved address set. Required for sender/recipient on transfers
+    /// of regulated assets (requires_kyc = true).
+    kyc_approved: HashSet<Address>,
     /// Protocol treasury address (set from consensus params at genesis/init).
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
@@ -94,6 +97,7 @@ impl StateDB {
             governance_proposals: HashMap::new(),
             unbonding_entries: HashMap::new(),
             slashing_seen: HashSet::new(),
+            kyc_approved: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -121,6 +125,7 @@ impl StateDB {
             governance_proposals: HashMap::new(),
             unbonding_entries: HashMap::new(),
             slashing_seen: HashSet::new(),
+            kyc_approved: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -811,6 +816,27 @@ impl StateDB {
         self.persist_slashing_seen();
     }
 
+    /// Check whether an address has been KYC-approved on this chain.
+    pub fn is_kyc_approved(&self, address: &Address) -> bool {
+        self.kyc_approved.contains(address)
+    }
+
+    /// Set or clear the KYC approval flag for an address. Typically only
+    /// callable by the treasury / admin via a governance-gated transaction.
+    pub fn set_kyc_approved(&mut self, address: &Address, approved: bool) {
+        if approved {
+            self.kyc_approved.insert(*address);
+        } else {
+            self.kyc_approved.remove(address);
+        }
+        if let Some(ref storage) = self.storage {
+            let items: Vec<Address> = self.kyc_approved.iter().copied().collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"kyc:approved", &bytes);
+            }
+        }
+    }
+
     /// Rewrite the slashing_seen blob to storage. Called after mutations.
     fn persist_slashing_seen(&self) {
         if let Some(ref storage) = self.storage {
@@ -851,6 +877,11 @@ impl StateDB {
         if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"unbonding:all") {
             if let Ok(items) = borsh::from_slice::<Vec<(Address, Vec<UnbondingEntry>)>>(&bytes) {
                 self.unbonding_entries = items.into_iter().collect();
+            }
+        }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"kyc:approved") {
+            if let Ok(items) = borsh::from_slice::<Vec<Address>>(&bytes) {
+                self.kyc_approved = items.into_iter().collect();
             }
         }
     }
@@ -937,9 +968,17 @@ impl StateDB {
 
         self.storage = Some(storage);
 
-        // Now that storage is attached, flush unbonding + slashing dedup set
+        // Now that storage is attached, flush unbonding + slashing dedup set + KYC
         self.persist_unbonding_entries();
         self.persist_slashing_seen();
+        if !self.kyc_approved.is_empty() {
+            if let Some(ref storage) = self.storage {
+                let items: Vec<Address> = self.kyc_approved.iter().copied().collect();
+                if let Ok(bytes) = borsh::to_vec(&items) {
+                    let _ = storage.put(Column::ChainMeta, b"kyc:approved", &bytes);
+                }
+            }
+        }
     }
 
     // --- Finality Methods ---
@@ -1378,6 +1417,7 @@ mod tests {
             transfer_mode: crate::asset::TransferMode::PeerToPeer,
             registrar: None,
             redemption_pool: Amount::ZERO,
+            requires_kyc: false,
             created_at: 0,
         };
 

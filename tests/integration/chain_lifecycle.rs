@@ -192,6 +192,10 @@ fn asset_tokenization_lifecycle() {
     let issuer_ownership = state.get_ownership(&asset_id, &issuer_addr);
     assert_eq!(issuer_ownership.available, Amount::from_vtt(1_000_000));
 
+    // Regulated asset requires KYC on both sides for transfer
+    state.set_kyc_approved(&issuer_addr, true);
+    state.set_kyc_approved(&investor_addr, true);
+
     // Transfer asset to investor
     let transfer_tx = make_tx(
         &issuer_kp,

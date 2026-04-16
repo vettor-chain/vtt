@@ -211,6 +211,14 @@ pub enum TransactionAction {
         asset_id: H256,
     },
 
+    /// Set or clear KYC approval for an address. Callable only by the
+    /// treasury / admin address (self-governance-controlled). Required for
+    /// addresses that want to send or receive assets flagged `requires_kyc`.
+    SetKycApproval {
+        address: Address,
+        approved: bool,
+    },
+
     /// Credit a bridge deposit from an external chain (ETH -> VTT direction).
     /// Must be signed by the bridge relayer address. Replay protection via
     /// source_tx_hash — the same deposit cannot be credited twice.
@@ -441,6 +449,10 @@ mod tests {
             },
             TransactionAction::ClaimRedemption {
                 asset_id: H256::from([0xDD; 32]),
+            },
+            TransactionAction::SetKycApproval {
+                address: Address::from([0x33; 20]),
+                approved: true,
             },
         ];
 

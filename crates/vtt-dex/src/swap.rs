@@ -122,6 +122,7 @@ mod tests {
             transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
             registrar: None,
             redemption_pool: Amount::ZERO,
+            requires_kyc: false,
             created_at: 0,
         };
         state.register_asset(asset).unwrap();

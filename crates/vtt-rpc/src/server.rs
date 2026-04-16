@@ -1230,6 +1230,14 @@ fn tx_to_info(
                 None,
                 None,
             ),
+            TransactionAction::SetKycApproval { address, .. } => (
+                "SetKycApproval".to_string(),
+                Some(*address),
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
         };
 
     TransactionInfo {
