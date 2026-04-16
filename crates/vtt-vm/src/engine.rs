@@ -229,9 +229,7 @@ fn write_wasm_memory(
     let mem_guard = ctx.wasm_memory.lock().unwrap();
     let memory = mem_guard.as_ref().ok_or(())?;
     let view = memory.view(&env);
-    let end = (offset as u64)
-        .checked_add(data.len() as u64)
-        .ok_or(())?;
+    let end = (offset as u64).checked_add(data.len() as u64).ok_or(())?;
     if end > view.data_size() {
         return Err(());
     }

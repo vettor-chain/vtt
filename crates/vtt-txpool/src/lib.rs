@@ -81,6 +81,16 @@ impl TxPool {
 
     /// Add a transaction to the pool.
     /// `account_nonce` is the current nonce of the sender on-chain.
+    ///
+    /// Semantics:
+    /// - Replace-by-fee: if another tx is already pending for the same
+    ///   (sender, nonce), the new one wins only if its gas_price is strictly
+    ///   higher. Prevents free churning of identical-fee nonces.
+    /// - Pool-full eviction: if the global pool is at capacity and the new
+    ///   tx has a higher gas_price than the cheapest pending tx, the cheapest
+    ///   is evicted in favour of the new one. Prevents a spammer from filling
+    ///   the pool with min-fee transactions.
+    /// - Per-account cap: same eviction applied within the sender's queue.
     pub fn add(
         &mut self,
         tx: SignedTransaction,
@@ -92,13 +102,6 @@ impl TxPool {
         // Check for duplicates
         if self.known.contains(&tx_hash) {
             return Err(TxPoolError::AlreadyExists(tx_hash));
-        }
-
-        // Check pool capacity
-        if self.by_hash.len() >= self.config.max_size {
-            return Err(TxPoolError::PoolFull {
-                max: self.config.max_size,
-            });
         }
 
         // Check minimum gas price
@@ -117,12 +120,63 @@ impl TxPool {
             });
         }
 
-        // Check per-account limit
+        // Replace-by-fee on same (sender, nonce)
+        let mut replacing_hash: Option<H256> = None;
+        if let Some(sender_txs) = self.by_sender.get(&sender) {
+            if let Some(existing_hash) = sender_txs.get(&tx.payload.nonce) {
+                if let Some(existing_entry) = self.by_hash.get(existing_hash) {
+                    if tx.payload.gas_price <= existing_entry.tx.payload.gas_price {
+                        return Err(TxPoolError::GasPriceTooLow {
+                            got: tx.payload.gas_price,
+                            min: existing_entry.tx.payload.gas_price,
+                        });
+                    }
+                    replacing_hash = Some(*existing_hash);
+                }
+            }
+        }
+        if let Some(h) = replacing_hash {
+            self.remove(&h);
+            // Allow the replaced hash to be re-used (same tx data would still be blocked by its own hash)
+            self.known.remove(&h);
+        }
+
+        // Check pool capacity — evict cheapest if incoming is strictly better
+        if self.by_hash.len() >= self.config.max_size {
+            if let Some((cheapest_hash, cheapest_gas)) = self.cheapest_tx() {
+                if tx.payload.gas_price > cheapest_gas {
+                    self.remove(&cheapest_hash);
+                    self.known.remove(&cheapest_hash);
+                } else {
+                    return Err(TxPoolError::PoolFull {
+                        max: self.config.max_size,
+                    });
+                }
+            } else {
+                return Err(TxPoolError::PoolFull {
+                    max: self.config.max_size,
+                });
+            }
+        }
+
+        // Check per-account limit — evict sender's cheapest if incoming wins
         let sender_txs = self.by_sender.entry(sender).or_default();
         if sender_txs.len() >= self.config.max_per_account {
-            return Err(TxPoolError::PoolFull {
-                max: self.config.max_per_account,
-            });
+            let cheapest = sender_txs
+                .values()
+                .filter_map(|h| self.by_hash.get(h).map(|e| (*h, e.tx.payload.gas_price)))
+                .min_by_key(|(_, g)| *g);
+            match cheapest {
+                Some((h, gas)) if tx.payload.gas_price > gas => {
+                    self.remove(&h);
+                    self.known.remove(&h);
+                }
+                _ => {
+                    return Err(TxPoolError::PoolFull {
+                        max: self.config.max_per_account,
+                    });
+                }
+            }
         }
 
         debug!(
@@ -132,6 +186,7 @@ impl TxPool {
             "adding tx to pool"
         );
 
+        let sender_txs = self.by_sender.entry(sender).or_default();
         sender_txs.insert(tx.payload.nonce, tx_hash);
         self.by_hash.insert(
             tx_hash,
@@ -144,6 +199,14 @@ impl TxPool {
         self.known.insert(tx_hash);
 
         Ok(tx_hash)
+    }
+
+    /// Find the (hash, gas_price) of the cheapest pending tx in the pool.
+    fn cheapest_tx(&self) -> Option<(H256, Amount)> {
+        self.by_hash
+            .iter()
+            .map(|(h, e)| (*h, e.tx.payload.gas_price))
+            .min_by_key(|(_, g)| *g)
     }
 
     /// Remove a transaction by hash.
