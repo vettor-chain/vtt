@@ -38,6 +38,12 @@ pub enum ChainError {
     InvalidTimestamp { block: u64, parent: u64 },
     #[error("block timestamp {block} is more than 30s ahead of local clock {now}")]
     TimestampTooFarInFuture { block: u64, now: u64 },
+    #[error("weak subjectivity violation at block {checkpoint}: expected {expected}, got {got}")]
+    WeakSubjectivityViolation {
+        checkpoint: u64,
+        expected: H256,
+        got: H256,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ChainError>;
@@ -77,6 +83,8 @@ pub struct Chain {
     storage: Option<Arc<dyn KeyValueStore>>,
     /// Last finalized block number. Blocks at or below this height cannot be reverted.
     finalized_block: BlockNumber,
+    /// Optional weak subjectivity checkpoint (block_number, expected_hash).
+    weak_subjectivity: Option<(BlockNumber, H256)>,
 }
 
 impl Chain {
@@ -93,6 +101,7 @@ impl Chain {
             validator_set: ValidatorSet::empty(0),
             storage: None,
             finalized_block: 0,
+            weak_subjectivity: None,
         }
     }
 
@@ -118,6 +127,7 @@ impl Chain {
             validator_set: ValidatorSet::empty(0),
             storage: Some(storage),
             finalized_block,
+            weak_subjectivity: None,
         };
         if let Err(e) = chain.resume_from_storage() {
             debug!(%e, "no resumable chain state on disk, starting fresh");
@@ -262,6 +272,24 @@ impl Chain {
                 block_number: block.header.number,
                 finalized: self.finalized_block,
             });
+        }
+
+        // 2b'. Weak subjectivity: if a checkpoint (N, H) was configured and
+        // this block is at or above N, verify that our canonical chain at N
+        // contains H. A fork that diverges before the checkpoint is rejected
+        // here — mitigates long-range attacks from historical validator sets.
+        if let Some((cp_number, cp_hash)) = self.weak_subjectivity {
+            if block.header.number >= cp_number {
+                if let Some(stored) = self.canonical.get(&cp_number) {
+                    if *stored != cp_hash {
+                        return Err(ChainError::WeakSubjectivityViolation {
+                            checkpoint: cp_number,
+                            expected: cp_hash,
+                            got: *stored,
+                        });
+                    }
+                }
+            }
         }
 
         // 2c. Timestamp sanity: must strictly increase over the parent, and
@@ -467,13 +495,39 @@ impl Chain {
     }
 
     /// Fork choice rule: is this block the new head?
-    /// Longest-chain with finality enforcement: a block cannot become the
-    /// new head if adopting it would revert past the finalized block.
+    /// Longest-chain with finality enforcement plus a deterministic tie-break.
+    ///
+    /// If the incoming header has a strictly greater number it becomes head.
+    /// If it matches the current head's number (equal-length forks observed
+    /// during a partition), the one whose hash sorts lower wins. This keeps
+    /// honest validators converging on the same canonical chain after a split.
     fn is_new_head(&self, header: &BlockHeader) -> bool {
         match self.head() {
-            Some(head) => header.number > head.number,
+            Some(head) => match header.number.cmp(&head.number) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => {
+                    let incoming_hash = blake3_hash(&header.signable_bytes());
+                    let current_head_hash = self.head_hash.unwrap_or(H256::ZERO);
+                    incoming_hash < current_head_hash
+                }
+            },
             None => true,
         }
+    }
+
+    /// Install a weak subjectivity checkpoint: a block (number, hash) that
+    /// node operators are asked to verify out-of-band. On import, the chain
+    /// rejects any branch whose block at `number` does not match `hash`.
+    /// This mitigates long-range attacks where a minority of historical
+    /// validators colludes to build an alternate chain from genesis.
+    pub fn set_weak_subjectivity_checkpoint(&mut self, number: BlockNumber, hash: H256) {
+        self.weak_subjectivity = Some((number, hash));
+    }
+
+    /// Get the currently configured weak subjectivity checkpoint if any.
+    pub fn weak_subjectivity(&self) -> Option<(BlockNumber, H256)> {
+        self.weak_subjectivity
     }
 
     /// Set the finalized block number. Persists to storage and updates the

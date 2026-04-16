@@ -200,6 +200,38 @@ async fn main() {
         .init_genesis(genesis_result.block, genesis_result.state)
         .expect("genesis init failed");
 
+    // Optional weak subjectivity checkpoint:
+    //   --checkpoint <block_number>:<hex-hash>
+    // Protects against long-range attacks from compromised historical
+    // validator sets by refusing any branch whose canonical block at
+    // `block_number` does not match the configured hash.
+    if let Some(cp) = args
+        .iter()
+        .position(|a| a == "--checkpoint")
+        .and_then(|i| args.get(i + 1))
+    {
+        if let Some((num_str, hash_str)) = cp.split_once(':') {
+            if let (Ok(num), Ok(hash_bytes)) = (
+                num_str.parse::<u64>(),
+                hex::decode(hash_str.trim_start_matches("0x")),
+            ) {
+                if hash_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&hash_bytes);
+                    chain.set_weak_subjectivity_checkpoint(num, H256::from(arr));
+                    info!(
+                        checkpoint_block = num,
+                        "weak subjectivity checkpoint installed"
+                    );
+                } else {
+                    warn!("--checkpoint hash must be 32 bytes hex; ignoring");
+                }
+            } else {
+                warn!("--checkpoint must be <block_number>:<hex-hash>; ignoring");
+            }
+        }
+    }
+
     // Telemetry
     let metrics = Arc::new(NodeMetrics::new());
     if let Some(height) = chain.height() {
