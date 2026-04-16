@@ -627,18 +627,16 @@ impl VttApiServer for VttRpcImpl {
             let rb = pool.reserve_b.raw();
 
             // price_a_in_b = reserve_b / reserve_a, scaled to 18 decimals
-            let price_a_in_b = if ra > 0 {
-                rb.saturating_mul(10u128.pow(18)) / ra
-            } else {
-                0
-            };
+            let price_a_in_b = rb
+                .saturating_mul(10u128.pow(18))
+                .checked_div(ra)
+                .unwrap_or(0);
 
             // price_b_in_a = reserve_a / reserve_b, scaled to 18 decimals
-            let price_b_in_a = if rb > 0 {
-                ra.saturating_mul(10u128.pow(18)) / rb
-            } else {
-                0
-            };
+            let price_b_in_a = ra
+                .saturating_mul(10u128.pow(18))
+                .checked_div(rb)
+                .unwrap_or(0);
 
             prices.push(PoolPriceRpc {
                 pool_id: pool.pool_id,
