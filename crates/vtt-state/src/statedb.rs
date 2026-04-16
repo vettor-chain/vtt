@@ -63,6 +63,12 @@ pub struct StateDB {
     /// KYC-approved address set. Required for sender/recipient on transfers
     /// of regulated assets (requires_kyc = true).
     kyc_approved: HashSet<Address>,
+    /// Map from (validator, epoch, slot) to the hash of the first block
+    /// observed at that commit. A second block at the same key with a
+    /// different hash is direct double-sign evidence.
+    block_commitments: HashMap<(Address, u64, u32), H256>,
+    /// Missed-slot counter per (epoch, validator) for downtime detection.
+    missed_slots: HashMap<(u64, Address), u32>,
     /// Protocol treasury address (set from consensus params at genesis/init).
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
@@ -98,6 +104,8 @@ impl StateDB {
             unbonding_entries: HashMap::new(),
             slashing_seen: HashSet::new(),
             kyc_approved: HashSet::new(),
+            block_commitments: HashMap::new(),
+            missed_slots: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -126,6 +134,8 @@ impl StateDB {
             unbonding_entries: HashMap::new(),
             slashing_seen: HashSet::new(),
             kyc_approved: HashSet::new(),
+            block_commitments: HashMap::new(),
+            missed_slots: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -816,6 +826,72 @@ impl StateDB {
         self.persist_slashing_seen();
     }
 
+    /// Record the hash of a block committed at (validator, epoch, slot).
+    /// Returns the previously recorded hash if any — a caller that sees a
+    /// Some(other_hash) where other_hash != new_hash has detected a
+    /// double-sign.
+    pub fn record_block_commitment(
+        &mut self,
+        validator: Address,
+        epoch: u64,
+        slot: u32,
+        hash: H256,
+    ) -> Option<H256> {
+        let key = (validator, epoch, slot);
+        let prior = self.block_commitments.get(&key).copied();
+        self.block_commitments.insert(key, hash);
+        if prior.is_none() {
+            self.persist_block_commitments();
+        }
+        prior
+    }
+
+    fn persist_block_commitments(&self) {
+        if let Some(ref storage) = self.storage {
+            let items: Vec<((Address, u64, u32), H256)> = self
+                .block_commitments
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"block:commitments", &bytes);
+            }
+        }
+    }
+
+    /// Increment the missed-slot counter for a validator in a given epoch.
+    pub fn record_missed_slot(&mut self, epoch: u64, validator: Address) {
+        let counter = self.missed_slots.entry((epoch, validator)).or_insert(0);
+        *counter = counter.saturating_add(1);
+        self.persist_missed_slots();
+    }
+
+    /// Get (and remove) missed slot counts for a whole epoch. Used at epoch
+    /// rotation to apply downtime slashing and reset the counters.
+    pub fn take_missed_slots_for_epoch(&mut self, epoch: u64) -> Vec<(Address, u32)> {
+        let mut out = Vec::new();
+        self.missed_slots.retain(|(e, addr), count| {
+            if *e == epoch {
+                out.push((*addr, *count));
+                false
+            } else {
+                true
+            }
+        });
+        self.persist_missed_slots();
+        out
+    }
+
+    fn persist_missed_slots(&self) {
+        if let Some(ref storage) = self.storage {
+            let items: Vec<((u64, Address), u32)> =
+                self.missed_slots.iter().map(|(k, v)| (*k, *v)).collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"missed:slots", &bytes);
+            }
+        }
+    }
+
     /// Check whether an address has been KYC-approved on this chain.
     pub fn is_kyc_approved(&self, address: &Address) -> bool {
         self.kyc_approved.contains(address)
@@ -882,6 +958,16 @@ impl StateDB {
         if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"kyc:approved") {
             if let Ok(items) = borsh::from_slice::<Vec<Address>>(&bytes) {
                 self.kyc_approved = items.into_iter().collect();
+            }
+        }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"block:commitments") {
+            if let Ok(items) = borsh::from_slice::<Vec<((Address, u64, u32), H256)>>(&bytes) {
+                self.block_commitments = items.into_iter().collect();
+            }
+        }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"missed:slots") {
+            if let Ok(items) = borsh::from_slice::<Vec<((u64, Address), u32)>>(&bytes) {
+                self.missed_slots = items.into_iter().collect();
             }
         }
     }
@@ -979,6 +1065,8 @@ impl StateDB {
                 }
             }
         }
+        self.persist_block_commitments();
+        self.persist_missed_slots();
     }
 
     // --- Finality Methods ---

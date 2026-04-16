@@ -309,12 +309,109 @@ impl Chain {
                 new_epoch = block_epoch,
                 "epoch transition, re-electing validators"
             );
+            // Apply downtime slashing for validators whose missed-slot count
+            // in the closing epoch exceeds 50% of their slot allocation.
+            let old_epoch = self.validator_set.epoch;
+            let slots_per_epoch = self.consensus.params().epoch_length;
+            let validator_count = self.validator_set.validators.len() as u64;
+            let missed = self.state.take_missed_slots_for_epoch(old_epoch);
+            if validator_count > 0 && slots_per_epoch > 0 {
+                let slot_allocation = (slots_per_epoch / validator_count).max(1) as u32;
+                for (validator, miss_count) in missed {
+                    if vtt_consensus::slashing::is_downtime_violation(
+                        miss_count,
+                        slot_allocation,
+                        50,
+                    ) {
+                        let account = self.state.get_account(&validator);
+                        let total_stake = account
+                            .staking
+                            .as_ref()
+                            .map(|s| s.total_stake)
+                            .unwrap_or(Amount::ZERO);
+                        if !total_stake.is_zero() {
+                            let slash_amount =
+                                vtt_consensus::slashing::calculate_downtime_slash(total_stake, 10); // 0.1%
+                            let actual = self.state.apply_slash(&validator, slash_amount);
+                            if !actual.is_zero() {
+                                self.state
+                                    .record_slash(&validator, old_epoch, "downtime", actual);
+                                tracing::warn!(
+                                    ?validator,
+                                    epoch = old_epoch,
+                                    missed = miss_count,
+                                    %actual,
+                                    "downtime slash applied at epoch rotation"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             self.validator_set = self.consensus.elect_validators(&self.state, block_epoch);
         }
 
         // 5. Verify consensus (producer, signature, etc.)
         self.consensus
             .verify_header(&block.header, &parent_header, &self.validator_set)?;
+
+        // 5b. Double-sign detection: record commitment and, if a different
+        // block was already seen at (validator, epoch, slot), build evidence
+        // and apply the slash immediately. This is the automatic detection
+        // pipeline; validators can still relay evidence via SubmitSlashingEvidence
+        // for blocks that pre-date the change.
+        let vs_validator = block.header.validator;
+        let vs_epoch = block.header.epoch;
+        let vs_slot = block.header.slot;
+        if let Some(prior_hash) =
+            self.state
+                .record_block_commitment(vs_validator, vs_epoch, vs_slot, block_hash)
+        {
+            if prior_hash != block_hash {
+                if let Some(prior_header) = self.headers.get(&prior_hash).cloned() {
+                    use vtt_consensus::slashing::DoubleSignEvidence;
+                    let evidence = vec![DoubleSignEvidence {
+                        header_a: prior_header,
+                        header_b: block.header.clone(),
+                    }];
+                    let slashed = vtt_executor::process_slashing_evidence(
+                        &mut self.state,
+                        &evidence,
+                        500, // 5% penalty for double-sign
+                        block_epoch,
+                    );
+                    if !slashed.is_empty() {
+                        tracing::warn!(
+                            ?vs_validator,
+                            epoch = vs_epoch,
+                            slot = vs_slot,
+                            "double-sign detected and slashed on block import"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 5c. Downtime tracking: any expected leader whose slot we skipped
+        // since the parent counts as a miss for this epoch. At the next
+        // epoch rotation those counters get flushed and, over threshold,
+        // produce a downtime slash.
+        let slots_per_epoch = self.consensus.params().epoch_length as u32;
+        let parent_slot = parent_header.slot;
+        if block.header.epoch == parent_header.epoch && block.header.slot > parent_slot + 1 {
+            let validators = self.validator_set.validators.clone();
+            if !validators.is_empty() {
+                for missed_slot in (parent_slot + 1)..block.header.slot {
+                    let idx = (missed_slot as usize) % validators.len();
+                    let missed_validator = validators[idx].address;
+                    if missed_validator != vs_validator {
+                        self.state
+                            .record_missed_slot(block.header.epoch, missed_validator);
+                    }
+                }
+            }
+            let _ = slots_per_epoch;
+        }
 
         // 6. Execute transactions with block context from header
         let (receipts, _total_gas) = execute_block_transactions_at(
