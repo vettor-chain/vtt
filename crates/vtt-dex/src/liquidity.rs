@@ -280,6 +280,8 @@ fn register_lp_asset(
         valuation_oracle: None,
         documents: Default::default(),
         metadata_uri: String::new(),
+        jurisdiction: String::new(),
+        legal_entity: String::new(),
         created_at: 0,
     };
 
@@ -343,6 +345,8 @@ mod tests {
             valuation_oracle: None,
             documents: Default::default(),
             metadata_uri: String::new(),
+            jurisdiction: String::new(),
+            legal_entity: String::new(),
             created_at: 0,
         };
         state.register_asset(asset).unwrap();

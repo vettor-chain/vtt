@@ -22,6 +22,11 @@ pub enum AssetProposalAction {
     ChangeIssuer { new_issuer: Address },
     /// Generic text proposal (signal vote, no on-chain execution).
     Signal { description: String },
+    /// Dispose of the underlying asset (sell the property, liquidate, etc.).
+    /// On-chain: freezes the asset and marks it Redeemed after execution.
+    /// Off-chain: authorizes the SPV to proceed with the sale via notary/legal.
+    /// Requires supermajority (67%).
+    DisposeAsset { reason: String },
 }
 
 /// Status of an asset governance proposal.
@@ -124,6 +129,9 @@ mod tests {
             },
             AssetProposalAction::Signal {
                 description: "Test signal".to_string(),
+            },
+            AssetProposalAction::DisposeAsset {
+                reason: "Sell underlying property".to_string(),
             },
         ];
         for action in actions {

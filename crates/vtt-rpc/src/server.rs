@@ -435,6 +435,8 @@ impl VttApiServer for VttRpcImpl {
             total_supply: a.total_supply,
             status: a.status_str().to_string(),
             decimals: a.decimals,
+            jurisdiction: a.jurisdiction.clone(),
+            legal_entity: a.legal_entity.clone(),
         }))
     }
 
@@ -466,6 +468,8 @@ impl VttApiServer for VttRpcImpl {
                 total_supply: a.total_supply,
                 status: a.status_str().to_string(),
                 decimals: a.decimals,
+                jurisdiction: a.jurisdiction.clone(),
+                legal_entity: a.legal_entity.clone(),
             })
             .collect())
     }
@@ -1258,6 +1262,7 @@ fn proposal_to_info(p: &vtt_primitives::asset_governance::AssetProposal) -> Asse
         AssetProposalAction::DistributeRevenue { .. } => "DistributeRevenue",
         AssetProposalAction::ChangeIssuer { .. } => "ChangeIssuer",
         AssetProposalAction::Signal { .. } => "Signal",
+        AssetProposalAction::DisposeAsset { .. } => "DisposeAsset",
     }
     .to_string();
 

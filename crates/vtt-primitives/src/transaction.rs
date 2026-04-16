@@ -69,6 +69,10 @@ pub enum TransactionAction {
         total_supply: Amount,
         decimals: u8,
         asset_class: String,
+        /// ISO 3166-1 alpha-2 jurisdiction code (e.g. "IT", "LU", "CH").
+        jurisdiction: String,
+        /// Legal entity holding the asset (e.g. SPV name / registration number).
+        legal_entity: String,
     },
 
     /// Transfer tokenized asset (RWA native).
@@ -327,6 +331,8 @@ mod tests {
                 total_supply: Amount::from_vtt(1_000_000),
                 decimals: 18,
                 asset_class: "real_estate".to_string(),
+                jurisdiction: String::new(),
+                legal_entity: String::new(),
             },
             TransactionAction::AssetTransfer {
                 asset_id: H256::ZERO,

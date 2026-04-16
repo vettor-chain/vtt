@@ -123,6 +123,8 @@ pub struct AssetInfo {
     pub total_supply: Amount,
     pub status: String,
     pub decimals: u8,
+    pub jurisdiction: String,
+    pub legal_entity: String,
 }
 
 /// RPC response for asset balance.

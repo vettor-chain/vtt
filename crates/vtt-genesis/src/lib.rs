@@ -325,6 +325,8 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         valuation_oracle: None,
         documents: BTreeMap::new(),
         metadata_uri: String::new(),
+        jurisdiction: String::new(),
+        legal_entity: String::new(),
         created_at: 0,
     };
     state
@@ -370,6 +372,8 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         valuation_oracle: None,
         documents: BTreeMap::new(),
         metadata_uri: String::new(),
+        jurisdiction: String::new(),
+        legal_entity: String::new(),
         created_at: 0,
     };
     state

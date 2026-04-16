@@ -164,6 +164,8 @@ fn asset_tokenization_lifecycle() {
             total_supply: Amount::from_vtt(1_000_000),
             decimals: 18,
             asset_class: "real_estate".to_string(),
+            jurisdiction: String::new(),
+            legal_entity: String::new(),
         },
     );
 
@@ -382,6 +384,8 @@ fn dex_swap_lifecycle() {
             total_supply: asset_supply,
             decimals: 6,
             asset_class: "custom".to_string(),
+            jurisdiction: String::new(),
+            legal_entity: String::new(),
         },
     );
 

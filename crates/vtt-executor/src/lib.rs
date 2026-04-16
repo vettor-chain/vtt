@@ -318,6 +318,8 @@ fn execute_action(
             total_supply,
             decimals,
             asset_class,
+            jurisdiction,
+            legal_entity,
         } => {
             execute_create_asset(
                 state,
@@ -328,6 +330,8 @@ fn execute_action(
                 *total_supply,
                 *decimals,
                 asset_class,
+                jurisdiction,
+                legal_entity,
                 block_number,
             )?;
             Ok(vec![Log {
@@ -883,6 +887,8 @@ fn execute_create_asset(
     total_supply: Amount,
     decimals: u8,
     asset_class: &str,
+    jurisdiction: &str,
+    legal_entity: &str,
     block_number: u64,
 ) -> Result<(), ExecutionError> {
     // Generate a deterministic asset ID from sender + name + symbol
@@ -915,6 +921,8 @@ fn execute_create_asset(
         valuation_oracle: None,
         documents: std::collections::BTreeMap::new(),
         metadata_uri: metadata_uri.to_string(),
+        jurisdiction: jurisdiction.to_string(),
+        legal_entity: legal_entity.to_string(),
         created_at: block_number,
     };
 
@@ -1177,7 +1185,8 @@ fn execute_finalize_asset_proposal(
     // Check threshold based on action type
     let passes = if has_quorum {
         match &action {
-            AssetProposalAction::ChangeIssuer { .. } => proposal.passes_supermajority(),
+            AssetProposalAction::ChangeIssuer { .. }
+            | AssetProposalAction::DisposeAsset { .. } => proposal.passes_supermajority(),
             _ => proposal.passes_threshold(),
         }
     } else {
@@ -1200,6 +1209,14 @@ fn execute_finalize_asset_proposal(
             }
             AssetProposalAction::Signal { .. } => {
                 // No on-chain action for signal proposals
+            }
+            AssetProposalAction::DisposeAsset { .. } => {
+                // Freeze the asset and mark it Redeemed to prevent further trading.
+                // The actual sale happens off-chain via the SPV/legal entity.
+                let asset_mut = state.get_asset_mut(&asset_id).ok_or_else(|| {
+                    ExecutionError::Custom(format!("asset not found: {asset_id}"))
+                })?;
+                asset_mut.status = AssetStatus::Redeemed;
             }
         }
 

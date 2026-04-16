@@ -55,6 +55,8 @@ pub enum DocumentType {
     Valuation,
     AuditReport,
     RegulatoryApproval,
+    DeedOfTransfer,
+    Encumbrance,
     Custom(String),
 }
 
@@ -97,6 +99,10 @@ pub struct AssetRecord {
     pub documents: BTreeMap<DocumentType, DocumentRecord>,
     /// Metadata URI (IPFS, etc.).
     pub metadata_uri: String,
+    /// ISO 3166-1 alpha-2 jurisdiction code (e.g. "IT", "LU", "CH").
+    pub jurisdiction: String,
+    /// Legal entity holding the asset (e.g. SPV name / registration number).
+    pub legal_entity: String,
     /// Block number at creation.
     pub created_at: u64,
 }
@@ -237,6 +243,8 @@ mod tests {
             valuation_oracle: None,
             documents: BTreeMap::new(),
             metadata_uri: "ipfs://QmTest".to_string(),
+            jurisdiction: "IT".to_string(),
+            legal_entity: "Vettor RE S.r.l.".to_string(),
             created_at: 100,
         }
     }
