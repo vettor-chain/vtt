@@ -7,7 +7,9 @@ use tracing_subscriber::EnvFilter;
 
 use vtt_chain::Chain;
 use vtt_consensus::finality::{FinalityTracker, FinalityVote};
-use vtt_consensus::rewards::{calculate_epoch_reward, split_block_reward, split_gas_fees};
+use vtt_consensus::rewards::{
+    calculate_epoch_reward, split_block_reward, split_gas_fees, split_producer_reward,
+};
 use vtt_consensus::ConsensusEngine;
 use vtt_crypto::{blake3_hash, merkle_root, Keypair};
 use vtt_executor::{
@@ -842,13 +844,7 @@ fn try_produce_block(
 
     if per_block_reward.raw() > 0 {
         let split = split_block_reward(per_block_reward);
-        // TODO: When delegator reward distribution is implemented, use
-        // split_producer_reward(split.producer, validator.commission_bps) to split
-        // the producer share into validator commission and delegator rewards.
-        // Currently the full producer share goes to the validator address.
-        let _ = chain
-            .state_mut()
-            .add_balance(&validator_addr, split.producer);
+        distribute_producer_reward(chain.state_mut(), &validator_addr, split.producer);
         let _ = chain
             .state_mut()
             .add_balance(&treasury_addr, split.treasury);
@@ -859,14 +855,12 @@ fn try_produce_block(
             .fetch_add(minted_milli, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // 2. Gas fees: 70% burned, 30% to producer
+    // 2. Gas fees: 70% burned, 30% to producer (commission-aware)
     let total_gas_fees = Amount::from_raw(gas_used as u128 * gas_config.min_gas_price.raw());
     if total_gas_fees.raw() > 0 {
         let gas_split = split_gas_fees(total_gas_fees);
         // burned portion is simply not credited to anyone (effectively removed)
-        let _ = chain
-            .state_mut()
-            .add_balance(&validator_addr, gas_split.producer);
+        distribute_producer_reward(chain.state_mut(), &validator_addr, gas_split.producer);
         let burned_milli = (gas_split.burned.raw() / 10u128.pow(15)) as u64;
         rpc_state
             .total_burned_milli
@@ -955,5 +949,72 @@ fn try_produce_block(
             warn!(%e, "failed to import produced block");
             None
         }
+    }
+}
+
+/// Pay a producer reward according to the validator's declared commission:
+/// commission_bps goes to the validator, the remainder is split pro-rata
+/// between self-stake and all active delegators. Falls back to crediting
+/// the validator if staking state is missing.
+fn distribute_producer_reward(
+    state: &mut vtt_state::StateDB,
+    validator_addr: &Address,
+    producer_reward: Amount,
+) {
+    if producer_reward.raw() == 0 {
+        return;
+    }
+    let account = state.get_account(validator_addr);
+    let staking = match account.staking.as_ref() {
+        Some(s) if s.total_stake.raw() > 0 => s.clone(),
+        _ => {
+            let _ = state.add_balance(validator_addr, producer_reward);
+            return;
+        }
+    };
+
+    let split = split_producer_reward(producer_reward, staking.commission_bps);
+    // Commission to the validator operator
+    if split.validator_commission.raw() > 0 {
+        let _ = state.add_balance(validator_addr, split.validator_commission);
+    }
+
+    let total_stake = staking.total_stake.raw();
+    let stakers_pool = split.staker_rewards.raw();
+    if stakers_pool == 0 || total_stake == 0 {
+        return;
+    }
+
+    // Self-stake share for the validator
+    let self_share = staking
+        .self_stake
+        .raw()
+        .saturating_mul(stakers_pool)
+        .checked_div(total_stake)
+        .unwrap_or(0);
+    if self_share > 0 {
+        let _ = state.add_balance(validator_addr, Amount::from_raw(self_share));
+    }
+
+    // Delegator shares
+    let mut distributed = self_share;
+    for delegation in &staking.delegations {
+        let share = delegation
+            .amount
+            .raw()
+            .saturating_mul(stakers_pool)
+            .checked_div(total_stake)
+            .unwrap_or(0);
+        if share == 0 {
+            continue;
+        }
+        let _ = state.add_balance(&delegation.delegator, Amount::from_raw(share));
+        distributed = distributed.saturating_add(share);
+    }
+
+    // Rounding dust back to the validator (avoids lost VTT in edge cases)
+    if distributed < stakers_pool {
+        let dust = stakers_pool - distributed;
+        let _ = state.add_balance(validator_addr, Amount::from_raw(dust));
     }
 }

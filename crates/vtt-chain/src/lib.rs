@@ -34,6 +34,10 @@ pub enum ChainError {
     NoGenesis,
     #[error("block at height {block_number} reverts past finalized block {finalized}")]
     RevertsPastFinalized { block_number: u64, finalized: u64 },
+    #[error("block timestamp {block} must be strictly greater than parent {parent}")]
+    InvalidTimestamp { block: u64, parent: u64 },
+    #[error("block timestamp {block} is more than 30s ahead of local clock {now}")]
+    TimestampTooFarInFuture { block: u64, now: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, ChainError>;
@@ -257,6 +261,29 @@ impl Chain {
             return Err(ChainError::RevertsPastFinalized {
                 block_number: block.header.number,
                 finalized: self.finalized_block,
+            });
+        }
+
+        // 2c. Timestamp sanity: must strictly increase over the parent, and
+        // must not be more than MAX_FUTURE_DRIFT_MS ahead of wall clock. This
+        // prevents validators from backdating unbonding maturity, prematurely
+        // finalizing governance proposals, or poisoning state derived from
+        // block time.
+        if block.header.timestamp <= parent_header.timestamp {
+            return Err(ChainError::InvalidTimestamp {
+                block: block.header.timestamp,
+                parent: parent_header.timestamp,
+            });
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        const MAX_FUTURE_DRIFT_MS: u64 = 30_000;
+        if now_ms > 0 && block.header.timestamp > now_ms.saturating_add(MAX_FUTURE_DRIFT_MS) {
+            return Err(ChainError::TimestampTooFarInFuture {
+                block: block.header.timestamp,
+                now: now_ms,
             });
         }
 

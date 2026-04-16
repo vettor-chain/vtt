@@ -61,8 +61,24 @@ impl NetworkMessage {
         borsh::to_vec(self).expect("message serialization failed")
     }
 
-    /// Deserialize a message from Borsh bytes.
+    /// Maximum message size accepted by `decode` (~4 MiB). Anything larger is
+    /// assumed to be a DoS attempt and rejected before Borsh allocates.
+    pub const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
+
+    /// Deserialize a message from Borsh bytes. Rejects blobs larger than
+    /// `MAX_MESSAGE_SIZE` so malformed payloads claiming huge vectors cannot
+    /// exhaust memory during decode.
     pub fn decode(data: &[u8]) -> Result<Self, std::io::Error> {
+        if data.len() > Self::MAX_MESSAGE_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "network message exceeds maximum size: {} > {}",
+                    data.len(),
+                    Self::MAX_MESSAGE_SIZE
+                ),
+            ));
+        }
         Self::try_from_slice(data)
     }
 }

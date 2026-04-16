@@ -908,7 +908,14 @@ fn execute_stake(
                     vtt_state::statedb::StateError::Serialization("overflow".into()),
                 ))?;
     } else {
-        // Delegation
+        // Delegation — reject delegating to addresses that have never
+        // self-staked ("ghost validators"). A validator must have registered
+        // itself with at least one self-stake tx before delegators can join.
+        if staking.self_stake.is_zero() {
+            return Err(ExecutionError::Custom(
+                "cannot delegate to an address with no self-stake".into(),
+            ));
+        }
         if let Some(delegation) = staking
             .delegations
             .iter_mut()

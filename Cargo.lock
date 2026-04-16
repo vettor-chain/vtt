@@ -5018,6 +5018,7 @@ dependencies = [
  "vtt-network",
  "vtt-primitives",
  "vtt-rpc",
+ "vtt-state",
  "vtt-storage",
  "vtt-telemetry",
  "vtt-txpool",

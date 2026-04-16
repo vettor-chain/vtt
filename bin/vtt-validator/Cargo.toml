@@ -21,6 +21,7 @@ vtt-genesis = { workspace = true }
 vtt-txpool = { workspace = true }
 vtt-rpc = { workspace = true }
 vtt-storage = { workspace = true }
+vtt-state = { workspace = true }
 vtt-telemetry = { workspace = true }
 tokio = { workspace = true }
 borsh = { workspace = true }
