@@ -1185,8 +1185,9 @@ fn execute_finalize_asset_proposal(
     // Check threshold based on action type
     let passes = if has_quorum {
         match &action {
-            AssetProposalAction::ChangeIssuer { .. }
-            | AssetProposalAction::DisposeAsset { .. } => proposal.passes_supermajority(),
+            AssetProposalAction::ChangeIssuer { .. } | AssetProposalAction::DisposeAsset { .. } => {
+                proposal.passes_supermajority()
+            }
             _ => proposal.passes_threshold(),
         }
     } else {
