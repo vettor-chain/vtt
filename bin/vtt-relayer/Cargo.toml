@@ -1,0 +1,24 @@
+[package]
+name = "vtt-relayer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "VTT bridge relayer: mirrors Ethereum bridge deposits as on-chain BridgeDeposit transactions"
+
+[[bin]]
+name = "vtt-relayer"
+path = "src/main.rs"
+
+[dependencies]
+vtt-primitives = { workspace = true }
+vtt-crypto = { workspace = true }
+tokio = { workspace = true }
+borsh = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+jsonrpsee = { workspace = true, features = ["http-client", "client"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = "0.4"
+anyhow = { workspace = true }

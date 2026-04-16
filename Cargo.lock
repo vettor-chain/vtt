@@ -4933,6 +4933,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtt-relayer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "hex",
+ "jsonrpsee",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "vtt-crypto",
+ "vtt-primitives",
+]
+
+[[package]]
 name = "vtt-rpc"
 version = "0.1.0"
 dependencies = [
