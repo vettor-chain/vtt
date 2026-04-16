@@ -186,31 +186,55 @@ impl Default for VmEngine {
 
 // --- Helper: read bytes from WASM linear memory ---
 
-/// Read `len` bytes from WASM memory starting at `offset`.
+/// Maximum size of a single host-side read/write from/to WASM linear memory.
+/// Caps the allocation to prevent a malicious contract from passing a huge
+/// `len` that would OOM the validator before the wasmer bounds check runs.
+const MAX_HOST_IO_BYTES: u32 = 1 << 20; // 1 MiB
+
+/// Read `len` bytes from WASM memory starting at `offset`. Rejects reads
+/// larger than MAX_HOST_IO_BYTES, and validates that offset + len fits in
+/// the contract's linear memory before allocating the destination buffer.
 fn read_wasm_memory(
     env: &FunctionEnvMut<ExecutionContext>,
     offset: u32,
     len: u32,
 ) -> Result<Vec<u8>, ()> {
+    if len > MAX_HOST_IO_BYTES {
+        return Err(());
+    }
     let ctx = env.data();
     let mem_guard = ctx.wasm_memory.lock().unwrap();
     let memory = mem_guard.as_ref().ok_or(())?;
     let view = memory.view(&env);
+    let end = (offset as u64).checked_add(len as u64).ok_or(())?;
+    if end > view.data_size() {
+        return Err(());
+    }
     let mut buf = vec![0u8; len as usize];
     view.read(offset as u64, &mut buf).map_err(|_| ())?;
     Ok(buf)
 }
 
-/// Write bytes to WASM memory at `offset`.
+/// Write bytes to WASM memory at `offset`. Validates that offset + data.len
+/// fits in the contract's linear memory.
 fn write_wasm_memory(
     env: &FunctionEnvMut<ExecutionContext>,
     offset: u32,
     data: &[u8],
 ) -> Result<(), ()> {
+    if data.len() as u64 > MAX_HOST_IO_BYTES as u64 {
+        return Err(());
+    }
     let ctx = env.data();
     let mem_guard = ctx.wasm_memory.lock().unwrap();
     let memory = mem_guard.as_ref().ok_or(())?;
     let view = memory.view(&env);
+    let end = (offset as u64)
+        .checked_add(data.len() as u64)
+        .ok_or(())?;
+    if end > view.data_size() {
+        return Err(());
+    }
     view.write(offset as u64, data).map_err(|_| ())?;
     Ok(())
 }
