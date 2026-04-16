@@ -422,11 +422,7 @@ fn execute_action(
             amount_b,
         } => {
             let epoch_length = state.get_epoch_length();
-            let current_epoch = if epoch_length > 0 {
-                block_number / epoch_length
-            } else {
-                0
-            };
+            let current_epoch = block_number.checked_div(epoch_length).unwrap_or(0);
             let pool = vtt_dex::liquidity::create_pool(
                 state,
                 sender,
@@ -514,11 +510,7 @@ fn execute_action(
 
         TransactionAction::ClaimMiningRewards { pool_id } => {
             let epoch_length = state.get_epoch_length();
-            let current_epoch = if epoch_length > 0 {
-                block_number / epoch_length
-            } else {
-                0
-            };
+            let current_epoch = block_number.checked_div(epoch_length).unwrap_or(0);
 
             // Load mining state from storage
             let mining_data = state
