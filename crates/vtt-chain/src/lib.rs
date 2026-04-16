@@ -739,6 +739,48 @@ mod tests {
     }
 
     #[test]
+    fn unbonding_and_slashing_seen_survive_restart() {
+        use vtt_state::account::UnbondingEntry;
+        use vtt_storage::memory::InMemoryStore;
+
+        let storage: Arc<dyn vtt_storage::KeyValueStore> = Arc::new(InMemoryStore::new());
+        let addr = Address::from([0x77; 20]);
+
+        // First run: write some unbonding entries and slashing evidence
+        {
+            let mut db = StateDB::with_storage(storage.clone());
+            db.add_unbonding_entry(
+                addr,
+                UnbondingEntry {
+                    amount: Amount::from_vtt(1_000),
+                    completion_time: 9_999_999_999,
+                },
+            );
+            db.mark_slashing_evidence(addr, 42, 7);
+            assert_eq!(db.get_unbonding_entries(&addr).len(), 1);
+            assert!(db.slashing_evidence_seen(&addr, 42, 7));
+        }
+
+        // Second run: fresh StateDB with same storage, data must reappear
+        {
+            let db = StateDB::with_storage(storage);
+            assert_eq!(
+                db.get_unbonding_entries(&addr).len(),
+                1,
+                "unbonding entry must survive restart"
+            );
+            assert_eq!(
+                db.get_unbonding_entries(&addr)[0].amount,
+                Amount::from_vtt(1_000)
+            );
+            assert!(
+                db.slashing_evidence_seen(&addr, 42, 7),
+                "slashing evidence dedup must survive restart"
+            );
+        }
+    }
+
+    #[test]
     fn chain_resumes_from_storage_across_restart() {
         use vtt_storage::memory::InMemoryStore;
 

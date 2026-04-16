@@ -108,7 +108,7 @@ impl StateDB {
     /// Create a state database backed by persistent storage.
     /// Reads fall through from cache to disk; writes go to both.
     pub fn with_storage(storage: Arc<dyn KeyValueStore>) -> Self {
-        Self {
+        let mut db = Self {
             accounts: HashMap::new(),
             assets: HashMap::new(),
             ownership: HashMap::new(),
@@ -129,7 +129,11 @@ impl StateDB {
             dirty_assets: Vec::new(),
             dirty_pools: Vec::new(),
             storage: Some(storage),
-        }
+        };
+        // State that doesn't fall through cache -> disk on read must be
+        // eagerly loaded from storage so the restart path is consistent.
+        db.load_non_fallthrough_state();
+        db
     }
 
     /// Create a state database with pre-loaded accounts (e.g., from genesis).
@@ -804,6 +808,51 @@ impl StateDB {
     /// Mark slashing evidence as processed (prevents double-slashing).
     pub fn mark_slashing_evidence(&mut self, offender: Address, epoch: u64, slot: u32) {
         self.slashing_seen.insert((offender, epoch, slot));
+        self.persist_slashing_seen();
+    }
+
+    /// Rewrite the slashing_seen blob to storage. Called after mutations.
+    fn persist_slashing_seen(&self) {
+        if let Some(ref storage) = self.storage {
+            let items: Vec<(Address, u64, u32)> = self.slashing_seen.iter().copied().collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"slashing:seen", &bytes);
+            }
+        }
+    }
+
+    /// Rewrite the unbonding_entries blob to storage. Called after mutations.
+    fn persist_unbonding_entries(&self) {
+        if let Some(ref storage) = self.storage {
+            let items: Vec<(Address, Vec<UnbondingEntry>)> = self
+                .unbonding_entries
+                .iter()
+                .map(|(a, v)| (*a, v.clone()))
+                .collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"unbonding:all", &bytes);
+            }
+        }
+    }
+
+    /// Load slashing_seen and unbonding_entries from storage on startup.
+    /// Called by `with_storage` so the restart path starts with the same
+    /// contents the validator was running with when it stopped.
+    fn load_non_fallthrough_state(&mut self) {
+        let storage = match &self.storage {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"slashing:seen") {
+            if let Ok(items) = borsh::from_slice::<Vec<(Address, u64, u32)>>(&bytes) {
+                self.slashing_seen = items.into_iter().collect();
+            }
+        }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"unbonding:all") {
+            if let Ok(items) = borsh::from_slice::<Vec<(Address, Vec<UnbondingEntry>)>>(&bytes) {
+                self.unbonding_entries = items.into_iter().collect();
+            }
+        }
     }
 
     /// Attach a persistent storage backend to a StateDB that was created
@@ -887,6 +936,10 @@ impl StateDB {
         );
 
         self.storage = Some(storage);
+
+        // Now that storage is attached, flush unbonding + slashing dedup set
+        self.persist_unbonding_entries();
+        self.persist_slashing_seen();
     }
 
     // --- Finality Methods ---
@@ -958,6 +1011,7 @@ impl StateDB {
     pub fn add_unbonding_entry(&mut self, address: Address, entry: UnbondingEntry) {
         let entries = self.unbonding_entries.entry(address).or_default();
         entries.push(entry);
+        self.persist_unbonding_entries();
     }
 
     /// Process matured unbonding entries: release funds for entries whose completion_time <= current_timestamp.
@@ -989,6 +1043,11 @@ impl StateDB {
 
         // Clean up empty entries
         self.unbonding_entries.retain(|_, v| !v.is_empty());
+
+        // Persist any removals/credits that occurred
+        if !total_released.is_zero() {
+            self.persist_unbonding_entries();
+        }
 
         total_released
     }
