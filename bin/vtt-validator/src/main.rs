@@ -670,13 +670,34 @@ fn handle_network_message(
             vec![]
         }
 
-        // T2: Handle finality votes from peers
+        // T2: Handle finality votes from peers (with signature verification)
         NetworkMessage::FinalityVote {
             voter,
             block_hash,
             block_number,
-            ..
+            signature,
         } => {
+            // Look up voter's public key from the current validator set
+            let voter_pubkey = match chain.read() {
+                Ok(c) => c
+                    .validator_set()
+                    .get(&voter)
+                    .and_then(|v| v.public_key.clone()),
+                Err(_) => None,
+            };
+            let Some(pubkey) = voter_pubkey else {
+                debug!(?voter, "finality vote from unknown/non-validator, dropping");
+                return vec![];
+            };
+            let signable = borsh::to_vec(&(voter, block_hash, block_number))
+                .expect("finality vote serialization cannot fail");
+            if vtt_crypto::verify(&signable, &signature, &pubkey).is_err() {
+                warn!(
+                    ?voter,
+                    block_number, "invalid finality vote signature, dropping"
+                );
+                return vec![];
+            }
             let vote = FinalityVote {
                 voter,
                 block_hash,
@@ -685,7 +706,6 @@ fn handle_network_message(
             let became_final = finality_tracker.submit_vote(vote);
             if became_final {
                 info!(block_number, "block finalized via peer votes");
-                // Persist finalized block number
                 if let Ok(mut chain_w) = chain.write() {
                     chain_w.set_finalized_block(block_number);
                 }
@@ -757,13 +777,8 @@ fn try_produce_block(
         .expect("system clock before UNIX epoch")
         .as_millis() as u64;
 
-    // T4: Process matured unbonding entries at the start of each block
-    let unbonded = chain.state_mut().process_unbonding(now_ms);
-    if !unbonded.is_zero() {
-        info!(amount = %unbonded, "released matured unbonding entries");
-    }
-
-    // Execute transactions with actual block number and timestamp
+    // Execute transactions with actual block number and timestamp.
+    // process_unbonding is called deterministically inside execute_block_transactions_at.
     let (receipts, gas_used) = execute_block_transactions_at(
         chain.state_mut(),
         &txs,

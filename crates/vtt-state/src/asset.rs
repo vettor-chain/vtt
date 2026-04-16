@@ -31,8 +31,21 @@ pub enum AssetStatus {
     Frozen,
     /// For debt instruments that have matured.
     Matured,
-    /// Fully redeemed, no outstanding tokens.
+    /// DisposeAsset proposal passed. Transfers blocked, but holders can unlock
+    /// their tokens from DEX/lockups to receive their pro-rata share of proceeds.
+    RedemptionPending,
+    /// Fully redeemed, no outstanding claims. Terminal state.
     Redeemed,
+}
+
+/// Transfer mode for a tokenized asset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub enum TransferMode {
+    /// Token holders can transfer directly to other addresses (self-custody model).
+    PeerToPeer,
+    /// Only the configured registrar can originate transfers (regulated model
+    /// where the registrar mirrors the legal registry).
+    RegistrarMediated,
 }
 
 /// Type of legal document attached to an asset.
@@ -103,6 +116,16 @@ pub struct AssetRecord {
     pub jurisdiction: String,
     /// Legal entity holding the asset (e.g. SPV name / registration number).
     pub legal_entity: String,
+    /// Transfer mode (peer-to-peer vs registrar-mediated).
+    pub transfer_mode: TransferMode,
+    /// Registrar address (required when transfer_mode = RegistrarMediated).
+    /// The registrar is the authorized entity that mirrors the legal registry
+    /// on-chain. All transfers must originate from this address.
+    pub registrar: Option<Address>,
+    /// Total redemption pool (in VTT) available for distribution when the asset
+    /// is in RedemptionPending. Holders claim their pro-rata share by calling
+    /// ClaimRedemption while their token balance is still on-chain.
+    pub redemption_pool: Amount,
     /// Block number at creation.
     pub created_at: u64,
 }
@@ -115,6 +138,7 @@ impl AssetRecord {
             AssetStatus::Active => "Active",
             AssetStatus::Frozen => "Frozen",
             AssetStatus::Matured => "Matured",
+            AssetStatus::RedemptionPending => "RedemptionPending",
             AssetStatus::Redeemed => "Redeemed",
         }
     }
@@ -122,6 +146,11 @@ impl AssetRecord {
     /// Check if the asset can be traded.
     pub fn is_tradeable(&self) -> bool {
         self.status == AssetStatus::Active
+    }
+
+    /// Check if holders can unlock / claim redemption (RedemptionPending only).
+    pub fn is_redemption_pending(&self) -> bool {
+        self.status == AssetStatus::RedemptionPending
     }
 
     /// Check if the asset is frozen.
@@ -245,6 +274,9 @@ mod tests {
             metadata_uri: "ipfs://QmTest".to_string(),
             jurisdiction: "IT".to_string(),
             legal_entity: "Vettor RE S.r.l.".to_string(),
+            transfer_mode: TransferMode::PeerToPeer,
+            registrar: None,
+            redemption_pool: Amount::ZERO,
             created_at: 100,
         }
     }

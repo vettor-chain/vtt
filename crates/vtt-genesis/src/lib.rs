@@ -327,6 +327,9 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         metadata_uri: String::new(),
         jurisdiction: String::new(),
         legal_entity: String::new(),
+        transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
+        registrar: None,
+        redemption_pool: Amount::ZERO,
         created_at: 0,
     };
     state
@@ -374,6 +377,9 @@ pub fn setup_dex_genesis(state: &mut StateDB, treasury: Address, chain_id: Chain
         metadata_uri: String::new(),
         jurisdiction: String::new(),
         legal_entity: String::new(),
+        transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
+        registrar: None,
+        redemption_pool: Amount::ZERO,
         created_at: 0,
     };
     state

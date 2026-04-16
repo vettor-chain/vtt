@@ -185,6 +185,47 @@ pub enum TransactionAction {
     UnfreezeAsset {
         asset_id: H256,
     },
+
+    /// Submit slashing evidence against a validator. Any sender can relay
+    /// evidence; the executor verifies the evidence on-chain before applying
+    /// any slash. Duplicate evidence is idempotent.
+    SubmitSlashingEvidence {
+        /// Borsh-serialized DoubleSignEvidence from vtt-consensus.
+        evidence: Vec<u8>,
+    },
+
+    /// Fund the redemption pool of an asset in RedemptionPending state.
+    /// Called by the issuer/registrar after the off-chain sale closes — the
+    /// VTT transferred here becomes the source of pro-rata redemption
+    /// payments for token holders.
+    FundRedemptionPool {
+        asset_id: H256,
+        amount: Amount,
+    },
+
+    /// Claim pro-rata redemption proceeds for a tokenized asset in
+    /// RedemptionPending state. The caller's available + locked token balance
+    /// determines their share of the redemption_pool. On successful claim,
+    /// the caller's tokens are burned and the corresponding VTT is credited.
+    ClaimRedemption {
+        asset_id: H256,
+    },
+
+    /// Credit a bridge deposit from an external chain (ETH -> VTT direction).
+    /// Must be signed by the bridge relayer address. Replay protection via
+    /// source_tx_hash — the same deposit cannot be credited twice.
+    BridgeDeposit {
+        /// Hash of the originating deposit tx on the source chain (e.g. Ethereum tx hash).
+        source_tx_hash: H256,
+        /// Source chain id (1 = Ethereum mainnet, 11155111 = Sepolia, etc).
+        source_chain: u32,
+        /// Recipient on VTT chain.
+        recipient: Address,
+        /// Token to credit: H256::ZERO for native VTT, otherwise an asset_id (e.g. vUSDT).
+        token: H256,
+        /// Amount to credit (net of fees).
+        amount: Amount,
+    },
 }
 
 /// Payload for cross-chain transfers.
@@ -383,6 +424,23 @@ mod tests {
             },
             TransactionAction::UnfreezeAsset {
                 asset_id: H256::from([0xAA; 32]),
+            },
+            TransactionAction::SubmitSlashingEvidence {
+                evidence: vec![0u8; 32],
+            },
+            TransactionAction::BridgeDeposit {
+                source_tx_hash: H256::from([0xCC; 32]),
+                source_chain: 1,
+                recipient: Address::from([0x22; 20]),
+                token: H256::ZERO,
+                amount: Amount::from_vtt(100),
+            },
+            TransactionAction::FundRedemptionPool {
+                asset_id: H256::from([0xDD; 32]),
+                amount: Amount::from_vtt(500_000),
+            },
+            TransactionAction::ClaimRedemption {
+                asset_id: H256::from([0xDD; 32]),
             },
         ];
 

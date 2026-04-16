@@ -88,6 +88,11 @@ pub fn execute_block_transactions_at(
     block_timestamp: u64,
     chain_id: ChainId,
 ) -> (Vec<TransactionReceipt>, u64) {
+    // Process matured unbonding entries deterministically at the start of the
+    // block so producer and importer reach the same state root. The block
+    // timestamp (not wall clock) drives maturation.
+    let _ = state.process_unbonding(block_timestamp);
+
     let mut receipts = Vec::with_capacity(transactions.len());
     let mut total_gas = 0u64;
 
@@ -346,6 +351,28 @@ fn execute_action(
             to,
             amount,
         } => {
+            // Enforce transfer_mode: registrar-mediated transfers must be
+            // originated by the configured registrar address. This anchors
+            // the on-chain ledger to the off-chain legal registry.
+            let asset = state
+                .get_asset(asset_id)
+                .ok_or(ExecutionError::AssetNotFound)?;
+            if matches!(
+                asset.transfer_mode,
+                vtt_state::asset::TransferMode::RegistrarMediated
+            ) {
+                let registrar = asset.registrar.ok_or_else(|| {
+                    ExecutionError::Custom(
+                        "asset configured as RegistrarMediated but has no registrar".into(),
+                    )
+                })?;
+                if *sender != registrar {
+                    return Err(ExecutionError::Custom(
+                        "registrar-mediated asset: only the registrar can originate transfers"
+                            .into(),
+                    ));
+                }
+            }
             state.transfer_asset(asset_id, sender, to, *amount)?;
             Ok(vec![Log {
                 address: *sender,
@@ -593,7 +620,276 @@ fn execute_action(
         TransactionAction::UnfreezeAsset { asset_id } => {
             execute_unfreeze_asset(state, sender, asset_id)
         }
+
+        TransactionAction::SubmitSlashingEvidence { evidence } => {
+            execute_submit_slashing_evidence(state, sender, evidence, block_number)
+        }
+
+        TransactionAction::FundRedemptionPool { asset_id, amount } => {
+            execute_fund_redemption_pool(state, sender, asset_id, *amount)
+        }
+
+        TransactionAction::ClaimRedemption { asset_id } => {
+            execute_claim_redemption(state, sender, asset_id)
+        }
+
+        TransactionAction::BridgeDeposit {
+            source_tx_hash,
+            source_chain,
+            recipient,
+            token,
+            amount,
+        } => execute_bridge_deposit(
+            state,
+            sender,
+            source_tx_hash,
+            *source_chain,
+            recipient,
+            token,
+            *amount,
+        ),
     }
+}
+
+/// Fund the redemption pool. Only the asset issuer can call this, and only
+/// when the asset is in RedemptionPending. VTT is debited from the sender.
+fn execute_fund_redemption_pool(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+    amount: Amount,
+) -> Result<Vec<Log>, ExecutionError> {
+    if amount.is_zero() {
+        return Err(ExecutionError::Custom("amount is zero".into()));
+    }
+    let asset = state
+        .get_asset(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    if asset.status != AssetStatus::RedemptionPending {
+        return Err(ExecutionError::Custom(
+            "asset is not in RedemptionPending state".into(),
+        ));
+    }
+    if asset.issuer != *sender {
+        return Err(ExecutionError::Custom(
+            "only the asset issuer can fund the redemption pool".into(),
+        ));
+    }
+
+    state.sub_balance(sender, amount)?;
+    let asset_mut = state
+        .get_asset_mut(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    asset_mut.redemption_pool =
+        asset_mut
+            .redemption_pool
+            .checked_add(amount)
+            .ok_or(ExecutionError::State(
+                vtt_state::statedb::StateError::Serialization("redemption_pool overflow".into()),
+            ))?;
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"FundRedemptionPool"), *asset_id],
+        data: borsh::to_vec(&(*sender, amount)).unwrap_or_default(),
+    }])
+}
+
+/// Claim pro-rata redemption for a single holder. The holder's available +
+/// locked token balance is burned and the corresponding share of the
+/// redemption_pool is credited as VTT. When the last holder claims, the asset
+/// transitions to Redeemed.
+fn execute_claim_redemption(
+    state: &mut StateDB,
+    sender: &Address,
+    asset_id: &H256,
+) -> Result<Vec<Log>, ExecutionError> {
+    let asset = state
+        .get_asset(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    if asset.status != AssetStatus::RedemptionPending {
+        return Err(ExecutionError::Custom(
+            "asset is not in RedemptionPending state".into(),
+        ));
+    }
+    let total_supply = asset.total_supply;
+    let pool = asset.redemption_pool;
+    if total_supply.is_zero() {
+        return Err(ExecutionError::Custom("asset has zero total supply".into()));
+    }
+    if pool.is_zero() {
+        return Err(ExecutionError::Custom(
+            "redemption pool is empty, no proceeds to claim".into(),
+        ));
+    }
+
+    let ownership = state.get_ownership(asset_id, sender);
+    let holder_total = ownership.total();
+    if holder_total.is_zero() {
+        return Err(ExecutionError::Custom(
+            "caller holds no tokens for this asset".into(),
+        ));
+    }
+
+    // Pro-rata share: (holder_total * pool) / total_supply
+    let share_raw = holder_total
+        .raw()
+        .checked_mul(pool.raw())
+        .ok_or(ExecutionError::State(
+            vtt_state::statedb::StateError::Serialization("redemption share overflow".into()),
+        ))?
+        / total_supply.raw();
+    let share = Amount::from_raw(share_raw);
+
+    // Burn the holder's tokens
+    let mut zeroed = ownership.clone();
+    zeroed.available = Amount::ZERO;
+    zeroed.locked = Amount::ZERO;
+    state.put_ownership(zeroed);
+
+    // Credit the share in VTT
+    state
+        .add_balance(sender, share)
+        .map_err(|e| ExecutionError::Custom(format!("credit failed: {e}")))?;
+
+    // Update asset: reduce total_supply by holder_total, reduce pool by share
+    let asset_mut = state
+        .get_asset_mut(asset_id)
+        .ok_or(ExecutionError::AssetNotFound)?;
+    asset_mut.total_supply = asset_mut.total_supply - holder_total;
+    asset_mut.redemption_pool = asset_mut.redemption_pool - share;
+    if asset_mut.total_supply.is_zero() {
+        asset_mut.status = AssetStatus::Redeemed;
+    }
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"ClaimRedemption"), *asset_id],
+        data: borsh::to_vec(&(*sender, holder_total, share)).unwrap_or_default(),
+    }])
+}
+
+/// Credit a bridge deposit on VTT chain. Signed by the configured relayer.
+fn execute_bridge_deposit(
+    state: &mut StateDB,
+    sender: &Address,
+    source_tx_hash: &H256,
+    _source_chain: u32,
+    recipient: &Address,
+    token: &H256,
+    amount: Amount,
+) -> Result<Vec<Log>, ExecutionError> {
+    // 1. Bridge must not be paused
+    if state.is_bridge_paused() {
+        return Err(ExecutionError::Custom("bridge is paused".into()));
+    }
+
+    // 2. Only the configured relayer can submit
+    let relayer = state.bridge_relayer();
+    if relayer == Address::ZERO {
+        return Err(ExecutionError::Custom(
+            "bridge relayer not configured".into(),
+        ));
+    }
+    if *sender != relayer {
+        return Err(ExecutionError::Custom(
+            "only the configured bridge relayer can submit BridgeDeposit".into(),
+        ));
+    }
+
+    // 3. Replay protection
+    if state.bridge_deposit_processed(source_tx_hash) {
+        return Err(ExecutionError::Custom(
+            "bridge deposit already processed".into(),
+        ));
+    }
+
+    if amount.is_zero() {
+        return Err(ExecutionError::Custom(
+            "bridge deposit amount is zero".into(),
+        ));
+    }
+
+    // 4. Credit recipient: either native VTT or an asset
+    if *token == H256::ZERO {
+        state
+            .add_balance(recipient, amount)
+            .map_err(|e| ExecutionError::Custom(format!("credit recipient failed: {e}")))?;
+    } else {
+        // Asset: must exist and be active
+        let asset = state
+            .get_asset(token)
+            .ok_or_else(|| ExecutionError::Custom(format!("bridge asset not found: {token}")))?;
+        if !asset.is_tradeable() {
+            return Err(ExecutionError::Custom("bridge asset is not active".into()));
+        }
+        let mut ownership = state.get_ownership(token, recipient);
+        ownership.credit(amount);
+        state.put_ownership(ownership);
+    }
+
+    state.mark_bridge_deposit_processed(source_tx_hash);
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"BridgeDeposit"), *source_tx_hash, *token],
+        data: borsh::to_vec(&(*recipient, *token, amount)).unwrap_or_default(),
+    }])
+}
+
+/// Execute a submit slashing evidence transaction. Verifies the evidence, and
+/// if valid and not already processed, applies a double-sign slash to the
+/// offender.
+fn execute_submit_slashing_evidence(
+    state: &mut StateDB,
+    sender: &Address,
+    evidence_bytes: &[u8],
+    block_number: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    use vtt_consensus::slashing::{calculate_double_sign_slash, DoubleSignEvidence};
+
+    let evidence = DoubleSignEvidence::try_from_slice(evidence_bytes)
+        .map_err(|_| ExecutionError::Custom("malformed slashing evidence".into()))?;
+
+    if !evidence.is_valid() {
+        return Err(ExecutionError::Custom("invalid slashing evidence".into()));
+    }
+
+    let offender = evidence.offender();
+
+    // Idempotency: dedup by (offender, epoch, slot) in state
+    if state.slashing_evidence_seen(&offender, evidence.header_a.epoch, evidence.header_a.slot) {
+        return Err(ExecutionError::Custom(
+            "slashing evidence already processed".into(),
+        ));
+    }
+
+    let account = state.get_account(&offender);
+    let total_stake = account
+        .staking
+        .as_ref()
+        .map(|s| s.total_stake)
+        .unwrap_or(Amount::ZERO);
+    if total_stake.is_zero() {
+        return Err(ExecutionError::Custom(
+            "offender has no stake to slash".into(),
+        ));
+    }
+
+    // 5% slash for double-sign
+    let slash_amount = calculate_double_sign_slash(total_stake, 500);
+    let actual = state.apply_slash(&offender, slash_amount);
+    let epoch = evidence.header_a.epoch;
+    state.record_slash(&offender, epoch, "double_sign", actual);
+    state.mark_slashing_evidence(offender, evidence.header_a.epoch, evidence.header_a.slot);
+
+    let mut topic_bytes = [0u8; 32];
+    topic_bytes[..20].copy_from_slice(offender.as_bytes());
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"SlashValidator"), H256::from(topic_bytes)],
+        data: borsh::to_vec(&(offender, actual, epoch, block_number)).unwrap_or_default(),
+    }])
 }
 
 /// Execute a staking operation.
@@ -907,6 +1203,27 @@ fn execute_create_asset(
         _ => AssetClass::Custom(asset_class.to_string()),
     };
 
+    // Regulated asset classes require jurisdiction (ISO 3166-1 alpha-2) and
+    // a non-empty legal_entity. Commodity/CarbonCredit/Invoice/Custom are
+    // currently treated as unregulated from the chain's perspective; stricter
+    // policy can be enforced at the chain compliance layer.
+    let is_regulated = matches!(
+        class,
+        AssetClass::Equity | AssetClass::Debt | AssetClass::RealEstate | AssetClass::Fund
+    );
+    if is_regulated {
+        if jurisdiction.len() != 2 || !jurisdiction.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(ExecutionError::Custom(
+                "jurisdiction must be a 2-letter ISO 3166-1 alpha-2 code for regulated asset classes".into(),
+            ));
+        }
+        if legal_entity.trim().is_empty() {
+            return Err(ExecutionError::Custom(
+                "legal_entity is required for regulated asset classes".into(),
+            ));
+        }
+    }
+
     let asset = AssetRecord {
         id: asset_id,
         name: name.to_string(),
@@ -923,6 +1240,9 @@ fn execute_create_asset(
         metadata_uri: metadata_uri.to_string(),
         jurisdiction: jurisdiction.to_string(),
         legal_entity: legal_entity.to_string(),
+        transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
+        registrar: None,
+        redemption_pool: Amount::ZERO,
         created_at: block_number,
     };
 
@@ -1212,12 +1532,16 @@ fn execute_finalize_asset_proposal(
                 // No on-chain action for signal proposals
             }
             AssetProposalAction::DisposeAsset { .. } => {
-                // Freeze the asset and mark it Redeemed to prevent further trading.
-                // The actual sale happens off-chain via the SPV/legal entity.
+                // Move the asset to RedemptionPending. Transfers are blocked
+                // but holders can still call ClaimRedemption to burn their
+                // tokens and receive their pro-rata share of the proceeds.
+                // The proceeds amount is credited off-chain after the legal
+                // sale closes; for now the redemption_pool is initialized to
+                // zero and incremented via a separate funding action.
                 let asset_mut = state.get_asset_mut(&asset_id).ok_or_else(|| {
                     ExecutionError::Custom(format!("asset not found: {asset_id}"))
                 })?;
-                asset_mut.status = AssetStatus::Redeemed;
+                asset_mut.status = AssetStatus::RedemptionPending;
             }
         }
 
@@ -1574,6 +1898,10 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::GovernancePropose { .. } => 100_000,
         TransactionAction::FreezeAsset { .. } => 30_000,
         TransactionAction::UnfreezeAsset { .. } => 30_000,
+        TransactionAction::SubmitSlashingEvidence { .. } => 150_000,
+        TransactionAction::BridgeDeposit { .. } => 80_000,
+        TransactionAction::FundRedemptionPool { .. } => 50_000,
+        TransactionAction::ClaimRedemption { .. } => 80_000,
     }
 }
 
@@ -1690,12 +2018,26 @@ pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 
 
         match &proposal.action {
             ProposalAction::ParameterChange { key, value } => {
-                debug!(
-                    key,
-                    value,
-                    ?proposal_id,
-                    "governance parameter change executed"
-                );
+                // Whitelisted keys that map to state mutations. Unknown keys
+                // are accepted but have no on-chain effect (signal-only).
+                match key.as_str() {
+                    "bridge_relayer" => {
+                        if let Some(addr) = parse_address(value) {
+                            state.set_bridge_relayer(addr);
+                            debug!(?proposal_id, %addr, "bridge_relayer updated");
+                        } else {
+                            debug!(?proposal_id, value, "invalid bridge_relayer address");
+                        }
+                    }
+                    _ => {
+                        debug!(
+                            key,
+                            value,
+                            ?proposal_id,
+                            "governance parameter change executed (signal)"
+                        );
+                    }
+                }
             }
             ProposalAction::TreasurySpend { recipient, amount } => {
                 let treasury_addr = state.get_treasury_address();
@@ -1787,6 +2129,19 @@ pub fn process_slashing_evidence(
         }
     }
     slashed
+}
+
+/// Parse a hex-encoded address string (with or without 0x prefix, 40 hex chars).
+fn parse_address(s: &str) -> Option<Address> {
+    let trimmed = s.trim().strip_prefix("0x").unwrap_or(s.trim());
+    if trimmed.len() != 40 {
+        return None;
+    }
+    let mut bytes = [0u8; 20];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(Address::from(bytes))
 }
 
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {

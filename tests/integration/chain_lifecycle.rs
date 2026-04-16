@@ -164,8 +164,8 @@ fn asset_tokenization_lifecycle() {
             total_supply: Amount::from_vtt(1_000_000),
             decimals: 18,
             asset_class: "real_estate".to_string(),
-            jurisdiction: String::new(),
-            legal_entity: String::new(),
+            jurisdiction: "IT".to_string(),
+            legal_entity: "Test SPV S.r.l.".to_string(),
         },
     );
 

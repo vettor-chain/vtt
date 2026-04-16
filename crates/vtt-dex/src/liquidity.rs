@@ -282,6 +282,9 @@ fn register_lp_asset(
         metadata_uri: String::new(),
         jurisdiction: String::new(),
         legal_entity: String::new(),
+        transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
+        registrar: None,
+        redemption_pool: Amount::ZERO,
         created_at: 0,
     };
 
@@ -347,6 +350,9 @@ mod tests {
             metadata_uri: String::new(),
             jurisdiction: String::new(),
             legal_entity: String::new(),
+            transfer_mode: vtt_state::asset::TransferMode::PeerToPeer,
+            registrar: None,
+            redemption_pool: Amount::ZERO,
             created_at: 0,
         };
         state.register_asset(asset).unwrap();

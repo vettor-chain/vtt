@@ -1,3 +1,4 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 use vtt_primitives::amount::Amount;
@@ -6,7 +7,7 @@ use vtt_primitives::{Address, Epoch};
 
 /// Evidence of a double-sign: two different block headers signed by the same
 /// validator for the same epoch and slot.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct DoubleSignEvidence {
     pub header_a: BlockHeader,
     pub header_b: BlockHeader,

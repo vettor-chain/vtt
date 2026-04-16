@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -57,6 +57,9 @@ pub struct StateDB {
     governance_proposals: HashMap<H256, Vec<u8>>,
     /// Unbonding entries by staker address (waiting to be released after unbonding period).
     unbonding_entries: HashMap<Address, Vec<UnbondingEntry>>,
+    /// Processed slashing evidence (dedup key: offender + epoch + slot).
+    /// Prevents double-slashing from duplicate evidence submissions.
+    slashing_seen: HashSet<(Address, u64, u32)>,
     /// Protocol treasury address (set from consensus params at genesis/init).
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
@@ -90,6 +93,7 @@ impl StateDB {
             mining_states: HashMap::new(),
             governance_proposals: HashMap::new(),
             unbonding_entries: HashMap::new(),
+            slashing_seen: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -116,6 +120,7 @@ impl StateDB {
             mining_states: HashMap::new(),
             governance_proposals: HashMap::new(),
             unbonding_entries: HashMap::new(),
+            slashing_seen: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -668,6 +673,50 @@ impl StateDB {
         }
     }
 
+    /// Get the bridge relayer address (the only address allowed to submit
+    /// BridgeDeposit transactions). Returns Address::ZERO if not set.
+    pub fn bridge_relayer(&self) -> Address {
+        if let Some(ref storage) = self.storage {
+            if let Ok(Some(v)) = storage.get(Column::ChainMeta, b"bridge:relayer") {
+                if v.len() == 20 {
+                    let mut bytes = [0u8; 20];
+                    bytes.copy_from_slice(&v);
+                    return Address::from(bytes);
+                }
+            }
+        }
+        Address::ZERO
+    }
+
+    /// Set the bridge relayer address (governance-controlled).
+    pub fn set_bridge_relayer(&mut self, relayer: Address) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, b"bridge:relayer", relayer.as_bytes());
+        }
+    }
+
+    /// Check whether a bridge deposit with this source tx hash has already
+    /// been credited on this chain. Prevents replay of relayer-submitted deposits.
+    pub fn bridge_deposit_processed(&self, source_tx_hash: &H256) -> bool {
+        if let Some(ref storage) = self.storage {
+            let mut key = b"bridge:deposit:".to_vec();
+            key.extend_from_slice(source_tx_hash.as_bytes());
+            if let Ok(Some(_)) = storage.get(Column::ChainMeta, &key) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark a bridge deposit as processed (call after successful credit).
+    pub fn mark_bridge_deposit_processed(&mut self, source_tx_hash: &H256) {
+        if let Some(ref storage) = self.storage {
+            let mut key = b"bridge:deposit:".to_vec();
+            key.extend_from_slice(source_tx_hash.as_bytes());
+            let _ = storage.put(Column::ChainMeta, &key, &[1u8]);
+        }
+    }
+
     /// Get the next governance proposal ID and atomically increment the counter.
     /// The counter is persisted in ChainMeta storage so IDs are unique across blocks.
     pub fn next_governance_id(&mut self) -> u64 {
@@ -744,6 +793,17 @@ impl StateDB {
             let value = format!("{}:{}", reason, amount.raw());
             let _ = storage.put(Column::ChainMeta, &key, value.as_bytes());
         }
+    }
+
+    /// Check if slashing evidence for (offender, epoch, slot) has already been
+    /// processed. Used to ensure evidence submissions are idempotent.
+    pub fn slashing_evidence_seen(&self, offender: &Address, epoch: u64, slot: u32) -> bool {
+        self.slashing_seen.contains(&(*offender, epoch, slot))
+    }
+
+    /// Mark slashing evidence as processed (prevents double-slashing).
+    pub fn mark_slashing_evidence(&mut self, offender: Address, epoch: u64, slot: u32) {
+        self.slashing_seen.insert((offender, epoch, slot));
     }
 
     // --- Finality Methods ---
@@ -1173,6 +1233,9 @@ mod tests {
             metadata_uri: String::new(),
             jurisdiction: String::new(),
             legal_entity: String::new(),
+            transfer_mode: crate::asset::TransferMode::PeerToPeer,
+            registrar: None,
+            redemption_pool: Amount::ZERO,
             created_at: 0,
         };
 

@@ -1198,6 +1198,40 @@ fn tx_to_info(
                 None,
                 None,
             ),
+            TransactionAction::SubmitSlashingEvidence { .. } => (
+                "SubmitSlashingEvidence".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::BridgeDeposit {
+                recipient, amount, ..
+            } => (
+                "BridgeDeposit".to_string(),
+                Some(*recipient),
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::FundRedemptionPool { amount, .. } => (
+                "FundRedemptionPool".to_string(),
+                None,
+                *amount,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::ClaimRedemption { .. } => (
+                "ClaimRedemption".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
         };
 
     TransactionInfo {
