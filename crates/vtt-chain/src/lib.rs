@@ -93,15 +93,17 @@ impl Chain {
     }
 
     /// Create a new chain backed by persistent storage.
+    /// On construction, attempts to resume any existing chain state persisted
+    /// in the storage. If the storage is empty, the chain is returned in its
+    /// uninitialized form and is expected to be initialized via `init_genesis`.
     pub fn with_storage(
         consensus: ConsensusEngine,
         gas_config: GasConfig,
         storage: Arc<dyn KeyValueStore>,
     ) -> Self {
         let state = StateDB::with_storage(storage.clone());
-        // Restore finalized block from persistent storage
         let finalized_block = state.finalized_block();
-        Self {
+        let mut chain = Self {
             headers: HashMap::new(),
             bodies: HashMap::new(),
             canonical: HashMap::new(),
@@ -112,22 +114,103 @@ impl Chain {
             validator_set: ValidatorSet::empty(0),
             storage: Some(storage),
             finalized_block,
+        };
+        if let Err(e) = chain.resume_from_storage() {
+            debug!(%e, "no resumable chain state on disk, starting fresh");
         }
+        chain
+    }
+
+    /// Try to load an existing chain from the persistent storage. Reads the
+    /// head hash from ChainMeta and walks the parent chain backward, filling
+    /// `headers`, `bodies` and `canonical`. Re-elects the validator set from
+    /// the current state. No-op if storage is absent or no head is stored.
+    fn resume_from_storage(&mut self) -> Result<()> {
+        let storage = match &self.storage {
+            Some(s) => s.clone(),
+            None => return Ok(()),
+        };
+
+        let head_bytes = match storage.get(Column::ChainMeta, b"head_hash") {
+            Ok(Some(b)) if b.len() == 32 => b,
+            _ => return Ok(()),
+        };
+        let mut head_arr = [0u8; 32];
+        head_arr.copy_from_slice(&head_bytes);
+        let head_hash = H256::from(head_arr);
+
+        let mut current = head_hash;
+        while let Some(header) = storage
+            .get(Column::BlockHeaders, current.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|b| borsh::from_slice::<BlockHeader>(&b).ok())
+        {
+            let number = header.number;
+            let parent = header.parent_hash;
+
+            self.canonical.insert(number, current);
+            if let Ok(Some(body_bytes)) = storage.get(Column::BlockBodies, current.as_bytes()) {
+                if let Ok(body) = borsh::from_slice::<Block>(&body_bytes) {
+                    self.bodies.insert(current, body);
+                }
+            }
+            self.headers.insert(current, header);
+
+            if number == 0 {
+                break;
+            }
+            current = parent;
+        }
+
+        if self.headers.is_empty() {
+            return Ok(());
+        }
+
+        self.head_hash = Some(head_hash);
+        if let Some(head) = self.headers.get(&head_hash) {
+            let epoch = self.consensus.epoch_for_block(head.number);
+            self.validator_set = self.consensus.elect_validators(&self.state, epoch);
+            info!(
+                head_number = head.number,
+                headers_loaded = self.headers.len(),
+                "resumed chain from persistent storage"
+            );
+        }
+        Ok(())
     }
 
     /// Initialize the chain with a genesis block and initial state.
+    /// Idempotent across restarts: if a chain was already persisted and loaded
+    /// via `resume_from_storage`, verifies the same genesis block and returns
+    /// the stored head hash without touching state.
     pub fn init_genesis(&mut self, genesis_block: Block, genesis_state: StateDB) -> Result<H256> {
-        if self.head_hash.is_some() {
-            return Err(ChainError::GenesisAlreadySet);
-        }
-
         let block_hash = blake3_hash(&genesis_block.header.signable_bytes());
+
+        // Restart path: chain already loaded from storage. Verify the genesis
+        // on disk matches the one being passed in, then return the head hash.
+        if let Some(head) = self.head_hash {
+            match self.canonical.get(&0) {
+                Some(stored_genesis) if *stored_genesis == block_hash => {
+                    info!(?block_hash, "chain already initialized, resuming");
+                    return Ok(head);
+                }
+                _ => {
+                    return Err(ChainError::GenesisAlreadySet);
+                }
+            }
+        }
 
         info!(?block_hash, "initializing chain with genesis block");
 
-        // If we have persistent storage, merge it into the genesis state
+        // Adopt the genesis state. Since build_genesis creates an in-memory
+        // StateDB, we must re-attach our persistent storage so subsequent
+        // writes (including all genesis allocations flushed here) are durable.
+        self.state = genesis_state;
         if let Some(ref storage) = self.storage {
-            // Persist genesis block
+            self.state.attach_storage(storage.clone());
+
+            // Persist genesis block + canonical index + head
             if let Ok(header_bytes) = borsh::to_vec(&genesis_block.header) {
                 let _ = storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes);
             }
@@ -137,8 +220,6 @@ impl Chain {
             let _ = storage.put(Column::ChainIndex, b"canonical:0", block_hash.as_bytes());
             let _ = storage.put(Column::ChainMeta, b"head_hash", block_hash.as_bytes());
         }
-
-        self.state = genesis_state;
 
         // Elect initial validator set from genesis state
         self.validator_set = self.consensus.elect_validators(&self.state, 0);
@@ -655,6 +736,96 @@ mod tests {
         let (mut chain, _genesis_hash, _val_addr) = setup_chain();
         chain.set_finalized_block(5);
         assert_eq!(chain.finalized_block(), 5);
+    }
+
+    #[test]
+    fn chain_resumes_from_storage_across_restart() {
+        use vtt_storage::memory::InMemoryStore;
+
+        let storage: Arc<dyn vtt_storage::KeyValueStore> = Arc::new(InMemoryStore::new());
+        let consensus = test_consensus();
+        let gas_config = GasConfig::default();
+
+        // Build a genesis state with a funded user
+        let val_addr = Address::from([0x10; 20]);
+        let user_addr = Address::from([0xAA; 20]);
+        let mut genesis_state = StateDB::new();
+        let mut val_account = AccountState::with_balance(Amount::from_vtt(500_000));
+        val_account.staking = Some(StakingState {
+            total_stake: Amount::from_vtt(100_000),
+            self_stake: Amount::from_vtt(100_000),
+            commission_bps: 500,
+            active: true,
+            delegations: Vec::new(),
+            unbonding: Vec::new(),
+        });
+        genesis_state.put_account(val_addr, val_account);
+        genesis_state.put_account(user_addr, AccountState::with_balance(Amount::from_vtt(999)));
+        let state_root = genesis_state.compute_state_root();
+
+        let genesis_block = Block::new(
+            BlockHeader {
+                version: 1,
+                chain_id: ChainId::RELAY,
+                number: 0,
+                parent_hash: H256::ZERO,
+                transactions_root: merkle_root(&[]),
+                state_root,
+                receipts_root: merkle_root(&[]),
+                validator: val_addr,
+                epoch: 0,
+                slot: 0,
+                timestamp: 1_700_000_000_000,
+                gas_limit: 10_000_000,
+                gas_used: 0,
+                cross_chain_root: None,
+                signature: Signature::ZERO,
+            },
+            vec![],
+        );
+
+        // First run: init genesis, persist user balance via the chain
+        {
+            let mut chain =
+                Chain::with_storage(test_consensus(), gas_config.clone(), storage.clone());
+            let genesis_hash = chain
+                .init_genesis(genesis_block.clone(), genesis_state)
+                .expect("first init");
+            assert_eq!(chain.height(), Some(0));
+            assert_eq!(
+                chain.get_balance_of(&user_addr),
+                Amount::from_vtt(999),
+                "user balance written to storage"
+            );
+            assert_eq!(chain.head_hash(), Some(genesis_hash));
+        }
+
+        // Second run: same storage, chain should resume
+        {
+            let mut chain = Chain::with_storage(test_consensus(), gas_config, storage.clone());
+            let _ = consensus; // silence unused-var warning
+                               // Chain must have loaded head + canonical + state from disk BEFORE init_genesis is called
+            assert!(
+                chain.head_hash().is_some(),
+                "chain should resume from storage"
+            );
+            assert_eq!(
+                chain.get_balance_of(&user_addr),
+                Amount::from_vtt(999),
+                "user balance survives restart"
+            );
+
+            // init_genesis is idempotent: passing the same genesis returns the stored head
+            let resumed_hash = chain
+                .init_genesis(genesis_block, StateDB::new())
+                .expect("idempotent init_genesis");
+            assert_eq!(chain.head_hash(), Some(resumed_hash));
+            assert_eq!(
+                chain.get_balance_of(&user_addr),
+                Amount::from_vtt(999),
+                "state not clobbered by idempotent init"
+            );
+        }
     }
 
     #[test]

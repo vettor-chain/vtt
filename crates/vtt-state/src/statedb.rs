@@ -806,6 +806,89 @@ impl StateDB {
         self.slashing_seen.insert((offender, epoch, slot));
     }
 
+    /// Attach a persistent storage backend to a StateDB that was created
+    /// without one. All current in-memory contents are flushed to disk so
+    /// that subsequent reads and the restart path see a consistent snapshot.
+    pub fn attach_storage(&mut self, storage: Arc<dyn KeyValueStore>) {
+        // Accounts
+        for (addr, acc) in &self.accounts {
+            if let Ok(bytes) = borsh::to_vec(acc) {
+                let _ = storage.put(Column::Accounts, addr.as_bytes(), &bytes);
+            }
+        }
+        // Assets
+        for (id, asset) in &self.assets {
+            if let Ok(bytes) = borsh::to_vec(asset) {
+                let _ = storage.put(Column::Assets, id.as_bytes(), &bytes);
+            }
+        }
+        // Ownership — key = asset_id || owner
+        for ((asset_id, owner), rec) in &self.ownership {
+            if let Ok(bytes) = borsh::to_vec(rec) {
+                let mut key = Vec::with_capacity(32 + 20);
+                key.extend_from_slice(asset_id.as_bytes());
+                key.extend_from_slice(owner.as_bytes());
+                let _ = storage.put(Column::Ownership, &key, &bytes);
+            }
+        }
+        // Oracles
+        for (feed_id, feed) in &self.oracles {
+            if let Ok(bytes) = borsh::to_vec(feed) {
+                let _ = storage.put(Column::Oracles, feed_id.as_bytes(), &bytes);
+            }
+        }
+        // Contract code
+        for (hash, code) in &self.contract_code {
+            let _ = storage.put(Column::ContractCode, hash.as_bytes(), code);
+        }
+        // Contract storage — key = contract || k
+        for ((contract, k), v) in &self.contract_storage {
+            let mut key = Vec::with_capacity(20 + k.len());
+            key.extend_from_slice(contract.as_bytes());
+            key.extend_from_slice(k);
+            let _ = storage.put(Column::ContractStorage, &key, v);
+        }
+        // Pools
+        for (pool_id, data) in &self.pools {
+            let _ = storage.put(Column::Pools, pool_id.as_bytes(), data);
+        }
+        // Mining states
+        for (pool_id, data) in &self.mining_states {
+            let _ = storage.put(Column::MiningStates, pool_id.as_bytes(), data);
+        }
+        // Asset proposals
+        for (id, proposal) in &self.asset_proposals {
+            if let Ok(bytes) = borsh::to_vec(proposal) {
+                let _ = storage.put(Column::AssetProposals, id.as_bytes(), &bytes);
+            }
+        }
+        // Governance proposals — key = "gov:" || id
+        for (id, data) in &self.governance_proposals {
+            let key = [b"gov:", id.as_bytes().as_slice()].concat();
+            let _ = storage.put(Column::ChainMeta, &key, data);
+        }
+        // Scalar chain meta
+        if self.treasury_address != Address::ZERO {
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"treasury_address",
+                self.treasury_address.as_bytes(),
+            );
+        }
+        let _ = storage.put(
+            Column::ChainMeta,
+            b"epoch_length",
+            &self.epoch_length.to_le_bytes(),
+        );
+        let _ = storage.put(
+            Column::ChainMeta,
+            b"dex:paused",
+            if self.dex_paused { &[1u8] } else { &[0u8] },
+        );
+
+        self.storage = Some(storage);
+    }
+
     // --- Finality Methods ---
 
     /// Persist the finalized block number.
