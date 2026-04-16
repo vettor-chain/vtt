@@ -206,21 +206,20 @@ impl TxPool {
 
         for (sender, sender_txs) in &self.by_sender {
             let start_nonce = account_nonces.get(sender).copied().unwrap_or(0);
-            let mut expected_nonce = start_nonce;
 
-            for (nonce, tx_hash) in sender_txs {
+            for (offset, (nonce, tx_hash)) in sender_txs.iter().enumerate() {
+                let expected_nonce = start_nonce + offset as u64;
                 if *nonce != expected_nonce {
                     break; // Gap in nonces, stop
                 }
                 if let Some(entry) = self.by_hash.get(tx_hash) {
                     candidates.push(&entry.tx);
                 }
-                expected_nonce += 1;
             }
         }
 
         // Sort by gas price descending (higher gas price = higher priority)
-        candidates.sort_by(|a, b| b.payload.gas_price.cmp(&a.payload.gas_price));
+        candidates.sort_by_key(|tx| std::cmp::Reverse(tx.payload.gas_price));
 
         candidates.into_iter().take(max_count).cloned().collect()
     }

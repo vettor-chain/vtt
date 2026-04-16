@@ -679,10 +679,7 @@ fn handle_network_message(
         } => {
             // Look up voter's public key from the current validator set
             let voter_pubkey = match chain.read() {
-                Ok(c) => c
-                    .validator_set()
-                    .get(&voter)
-                    .and_then(|v| v.public_key.clone()),
+                Ok(c) => c.validator_set().get(&voter).and_then(|v| v.public_key),
                 Err(_) => None,
             };
             let Some(pubkey) = voter_pubkey else {
