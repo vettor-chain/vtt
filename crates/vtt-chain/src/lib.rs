@@ -207,6 +207,22 @@ impl Chain {
             match self.canonical.get(&0) {
                 Some(stored_genesis) if *stored_genesis == block_hash => {
                     info!(?block_hash, "chain already initialized, resuming");
+                    // One-time migration: chains that produced blocks before
+                    // the stakers index was introduced have an empty index on
+                    // disk. Rebuild it from the genesis_state so subsequent
+                    // validator elections find the initial validators.
+                    if self.state.stakers_empty() {
+                        self.state.bootstrap_stakers_from(&genesis_state);
+                        // Re-elect now that the cache is warm.
+                        let head_number = self.headers.get(&head).map(|h| h.number).unwrap_or(0);
+                        let resume_epoch = self.consensus.epoch_for_block(head_number);
+                        self.validator_set =
+                            self.consensus.elect_validators(&self.state, resume_epoch);
+                        info!(
+                            validator_count = self.validator_set.validators.len(),
+                            "rebuilt stakers index from genesis_state"
+                        );
+                    }
                     return Ok(head);
                 }
                 _ => {

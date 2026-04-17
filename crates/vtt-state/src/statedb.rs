@@ -69,6 +69,10 @@ pub struct StateDB {
     block_commitments: HashMap<(Address, u64, u32), H256>,
     /// Missed-slot counter per (epoch, validator) for downtime detection.
     missed_slots: HashMap<(u64, Address), u32>,
+    /// Addresses that currently have a staking record. Persisted index so
+    /// elect_validators can iterate validators on a fresh StateDB whose
+    /// `accounts` HashMap has not yet been warmed from disk.
+    stakers: HashSet<Address>,
     /// Protocol treasury address (set from consensus params at genesis/init).
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
@@ -106,6 +110,7 @@ impl StateDB {
             kyc_approved: HashSet::new(),
             block_commitments: HashMap::new(),
             missed_slots: HashMap::new(),
+            stakers: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -136,6 +141,7 @@ impl StateDB {
             kyc_approved: HashSet::new(),
             block_commitments: HashMap::new(),
             missed_slots: HashMap::new(),
+            stakers: HashSet::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -190,7 +196,61 @@ impl StateDB {
                 let _ = storage.put(Column::Accounts, address.as_bytes(), &bytes);
             }
         }
+        // Maintain the stakers index so validator election works on a cold
+        // StateDB (the `accounts` cache is populated lazily from disk).
+        let has_stake = state
+            .staking
+            .as_ref()
+            .map(|s| !s.self_stake.is_zero())
+            .unwrap_or(false);
+        let changed = if has_stake {
+            self.stakers.insert(address)
+        } else {
+            self.stakers.remove(&address)
+        };
+        if changed {
+            self.persist_stakers();
+        }
         self.accounts.insert(address, state);
+    }
+
+    /// Whether the stakers index is empty. Used by Chain::init_genesis to
+    /// decide if a one-time rebuild is needed on resume (for chains produced
+    /// before the index was introduced).
+    pub fn stakers_empty(&self) -> bool {
+        self.stakers.is_empty()
+    }
+
+    /// Rebuild the stakers index from the given source StateDB (typically the
+    /// fresh genesis_state passed to init_genesis). Imports each staker's
+    /// account into this cache so elect_validators sees them. Does NOT
+    /// overwrite existing account state on disk when this cache already has
+    /// a more recent copy.
+    pub fn bootstrap_stakers_from(&mut self, source: &StateDB) {
+        for (addr, acc) in &source.accounts {
+            if let Some(ref s) = acc.staking {
+                if !s.self_stake.is_zero() {
+                    // If we already have state for this address on disk, prefer
+                    // that (it may carry deltas from staking/unstaking events).
+                    let existing = self.get_account(addr);
+                    if existing.staking.is_none() {
+                        self.put_account(*addr, acc.clone());
+                    } else {
+                        self.stakers.insert(*addr);
+                    }
+                }
+            }
+        }
+        self.persist_stakers();
+    }
+
+    fn persist_stakers(&self) {
+        if let Some(ref storage) = self.storage {
+            let items: Vec<Address> = self.stakers.iter().copied().collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"stakers:set", &bytes);
+            }
+        }
     }
 
     /// Check if an account exists (has been explicitly set).
@@ -1010,6 +1070,23 @@ impl StateDB {
                 self.missed_slots = items.into_iter().collect();
             }
         }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"stakers:set") {
+            if let Ok(items) = borsh::from_slice::<Vec<Address>>(&bytes) {
+                self.stakers = items.into_iter().collect();
+            }
+        }
+        // Warm the account cache for every staker so elect_validators (which
+        // iterates the in-memory map) sees their staking state after resume.
+        let addrs: Vec<Address> = self.stakers.iter().copied().collect();
+        for addr in addrs {
+            if let Some(ref storage) = self.storage {
+                if let Ok(Some(bytes)) = storage.get(Column::Accounts, addr.as_bytes()) {
+                    if let Ok(account) = borsh::from_slice::<AccountState>(&bytes) {
+                        self.accounts.insert(addr, account);
+                    }
+                }
+            }
+        }
     }
 
     /// Attach a persistent storage backend to a StateDB that was created
@@ -1107,6 +1184,19 @@ impl StateDB {
         }
         self.persist_block_commitments();
         self.persist_missed_slots();
+
+        // Rebuild the stakers index from the current in-memory accounts, then
+        // persist it. This ensures a freshly adopted genesis_state has its
+        // staker list on disk for the next restart.
+        self.stakers.clear();
+        for (addr, acc) in &self.accounts {
+            if let Some(ref s) = acc.staking {
+                if !s.self_stake.is_zero() {
+                    self.stakers.insert(*addr);
+                }
+            }
+        }
+        self.persist_stakers();
     }
 
     // --- Finality Methods ---
