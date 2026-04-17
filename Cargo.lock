@@ -4838,6 +4838,7 @@ dependencies = [
  "vtt-dex",
  "vtt-primitives",
  "vtt-state",
+ "vtt-storage",
  "vtt-vm",
 ]
 

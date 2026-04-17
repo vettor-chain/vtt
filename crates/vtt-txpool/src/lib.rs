@@ -79,6 +79,17 @@ impl TxPool {
         }
     }
 
+    /// Update the minimum gas price accepted by the pool. Called by the node
+    /// whenever a governance ParameterChange proposal changes `min_gas_price`.
+    pub fn set_min_gas_price(&mut self, min_gas_price: Amount) {
+        self.config.min_gas_price = min_gas_price;
+    }
+
+    /// Read the currently enforced minimum gas price.
+    pub fn min_gas_price(&self) -> Amount {
+        self.config.min_gas_price
+    }
+
     /// Add a transaction to the pool.
     /// `account_nonce` is the current nonce of the sender on-chain.
     ///

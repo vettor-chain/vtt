@@ -369,18 +369,26 @@ impl Chain {
                 "epoch transition, re-electing validators"
             );
             // Apply downtime slashing for validators whose missed-slot count
-            // in the closing epoch exceeds 50% of their slot allocation.
+            // in the closing epoch exceeds the configured threshold.
             let old_epoch = self.validator_set.epoch;
             let slots_per_epoch = self.consensus.params().epoch_length;
             let validator_count = self.validator_set.validators.len() as u64;
             let missed = self.state.take_missed_slots_for_epoch(old_epoch);
+            let downtime_threshold = self
+                .state
+                .get_downtime_threshold_pct_override()
+                .unwrap_or(self.consensus.params().downtime_threshold_pct);
+            let downtime_bps = self
+                .state
+                .get_slash_downtime_bps_override()
+                .unwrap_or(self.consensus.params().slash_downtime_bps);
             if validator_count > 0 && slots_per_epoch > 0 {
                 let slot_allocation = (slots_per_epoch / validator_count).max(1) as u32;
                 for (validator, miss_count) in missed {
                     if vtt_consensus::slashing::is_downtime_violation(
                         miss_count,
                         slot_allocation,
-                        50,
+                        downtime_threshold,
                     ) {
                         let account = self.state.get_account(&validator);
                         let total_stake = account
@@ -389,8 +397,10 @@ impl Chain {
                             .map(|s| s.total_stake)
                             .unwrap_or(Amount::ZERO);
                         if !total_stake.is_zero() {
-                            let slash_amount =
-                                vtt_consensus::slashing::calculate_downtime_slash(total_stake, 10); // 0.1%
+                            let slash_amount = vtt_consensus::slashing::calculate_downtime_slash(
+                                total_stake,
+                                downtime_bps,
+                            );
                             let actual = self.state.apply_slash(&validator, slash_amount);
                             if !actual.is_zero() {
                                 self.state
@@ -433,10 +443,14 @@ impl Chain {
                         header_a: prior_header,
                         header_b: block.header.clone(),
                     }];
+                    let double_sign_bps = self
+                        .state
+                        .get_slash_double_sign_bps_override()
+                        .unwrap_or(self.consensus.params().slash_double_sign_bps);
                     let slashed = vtt_executor::process_slashing_evidence(
                         &mut self.state,
                         &evidence,
-                        500, // 5% penalty for double-sign
+                        double_sign_bps,
                         block_epoch,
                     );
                     if !slashed.is_empty() {

@@ -1737,6 +1737,7 @@ fn execute_governance_propose(
         "parameter_change" => {
             let key = param_key.unwrap_or_default().to_string();
             let value = param_value.unwrap_or(description).to_string();
+            validate_parameter_change(&key, &value)?;
             ProposalAction::ParameterChange { key, value }
         }
         "treasury_spend" => {
@@ -2063,26 +2064,11 @@ pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 
 
         match &proposal.action {
             ProposalAction::ParameterChange { key, value } => {
-                // Whitelisted keys that map to state mutations. Unknown keys
-                // are accepted but have no on-chain effect (signal-only).
-                match key.as_str() {
-                    "bridge_relayer" => {
-                        if let Some(addr) = parse_address(value) {
-                            state.set_bridge_relayer(addr);
-                            debug!(?proposal_id, %addr, "bridge_relayer updated");
-                        } else {
-                            debug!(?proposal_id, value, "invalid bridge_relayer address");
-                        }
-                    }
-                    _ => {
-                        debug!(
-                            key,
-                            value,
-                            ?proposal_id,
-                            "governance parameter change executed (signal)"
-                        );
-                    }
-                }
+                // Whitelist + validation happens at proposal creation time
+                // (`validate_parameter_change`), so by the time we reach here
+                // the key is known and the value is well-formed. Re-validate
+                // defensively in case state was migrated from an older schema.
+                apply_parameter_change(state, key, value, &proposal_id);
             }
             ProposalAction::TreasurySpend { recipient, amount } => {
                 let treasury_addr = state.get_treasury_address();
@@ -2187,6 +2173,143 @@ fn parse_address(s: &str) -> Option<Address> {
         *b = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(Address::from(bytes))
+}
+
+/// Whitelist of governance-controlled protocol parameters and their acceptable
+/// value formats. Called at proposal creation time so unknown keys or malformed
+/// values never reach the execution path.
+fn validate_parameter_change(key: &str, value: &str) -> Result<(), ExecutionError> {
+    match key {
+        "bridge_relayer" | "treasury_address" => {
+            parse_address(value).ok_or_else(|| {
+                ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': value must be a 20-byte hex address",
+                ))
+            })?;
+        }
+        "min_gas_price" => {
+            value.trim().parse::<u128>().map_err(|_| {
+                ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': value must be a u128 (raw Amount)",
+                ))
+            })?;
+        }
+        "base_transfer_cost" | "cost_per_byte" | "unbonding_period_secs" => {
+            value.trim().parse::<u64>().map_err(|_| {
+                ExecutionError::Custom(format!("ParameterChange '{key}': value must be a u64"))
+            })?;
+        }
+        "slash_double_sign_bps" | "slash_downtime_bps" => {
+            let v: u16 = value.trim().parse().map_err(|_| {
+                ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': value must be a u16 (basis points 0..=10000)",
+                ))
+            })?;
+            if v > 10_000 {
+                return Err(ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': basis points must be <= 10000 (got {v})",
+                )));
+            }
+        }
+        "downtime_threshold_pct" => {
+            let v: u8 = value.trim().parse().map_err(|_| {
+                ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': value must be a u8 percentage 0..=100",
+                ))
+            })?;
+            if v > 100 {
+                return Err(ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': percentage must be <= 100 (got {v})",
+                )));
+            }
+        }
+        other => {
+            return Err(ExecutionError::Custom(format!(
+                "ParameterChange: unknown parameter '{other}'. Allowed: bridge_relayer, treasury_address, min_gas_price, base_transfer_cost, cost_per_byte, slash_double_sign_bps, slash_downtime_bps, downtime_threshold_pct, unbonding_period_secs",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Apply a validated ParameterChange to state. Values already passed
+/// `validate_parameter_change` at propose time; a parse failure here would only
+/// come from a corrupt persisted proposal, in which case we log and skip.
+fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_id: &H256) {
+    match key {
+        "bridge_relayer" => {
+            if let Some(addr) = parse_address(value) {
+                state.set_bridge_relayer(addr);
+                debug!(?proposal_id, %addr, "bridge_relayer updated");
+            } else {
+                debug!(
+                    ?proposal_id,
+                    value, "invalid bridge_relayer address (skipped)"
+                );
+            }
+        }
+        "treasury_address" => {
+            if let Some(addr) = parse_address(value) {
+                state.set_treasury_address(addr);
+                debug!(?proposal_id, %addr, "treasury_address updated");
+            }
+        }
+        "min_gas_price" => {
+            if let Ok(v) = value.trim().parse::<u128>() {
+                state.set_min_gas_price(Amount::from_raw(v));
+                debug!(?proposal_id, v, "min_gas_price updated");
+            }
+        }
+        "base_transfer_cost" => {
+            if let Ok(v) = value.trim().parse::<u64>() {
+                state.set_base_transfer_cost(v);
+                debug!(?proposal_id, v, "base_transfer_cost updated");
+            }
+        }
+        "cost_per_byte" => {
+            if let Ok(v) = value.trim().parse::<u64>() {
+                state.set_cost_per_byte(v);
+                debug!(?proposal_id, v, "cost_per_byte updated");
+            }
+        }
+        "slash_double_sign_bps" => {
+            if let Ok(v) = value.trim().parse::<u16>() {
+                if v <= 10_000 {
+                    state.set_slash_double_sign_bps(v);
+                    debug!(?proposal_id, v, "slash_double_sign_bps updated");
+                }
+            }
+        }
+        "slash_downtime_bps" => {
+            if let Ok(v) = value.trim().parse::<u16>() {
+                if v <= 10_000 {
+                    state.set_slash_downtime_bps(v);
+                    debug!(?proposal_id, v, "slash_downtime_bps updated");
+                }
+            }
+        }
+        "downtime_threshold_pct" => {
+            if let Ok(v) = value.trim().parse::<u8>() {
+                if v <= 100 {
+                    state.set_downtime_threshold_pct(v);
+                    debug!(?proposal_id, v, "downtime_threshold_pct updated");
+                }
+            }
+        }
+        "unbonding_period_secs" => {
+            if let Ok(v) = value.trim().parse::<u64>() {
+                state.set_unbonding_period_secs(v);
+                debug!(?proposal_id, v, "unbonding_period_secs updated");
+            }
+        }
+        other => {
+            debug!(
+                key = other,
+                ?proposal_id,
+                "unknown ParameterChange key on execute (corrupt state?) — skipping"
+            );
+        }
+    }
 }
 
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {
@@ -2669,5 +2792,82 @@ mod tests {
 
         let slashed = process_slashing_evidence(&mut state, &evidence, 500, 0);
         assert!(slashed.is_empty());
+    }
+
+    #[test]
+    fn validate_parameter_change_unknown_key_rejected() {
+        let err = validate_parameter_change("foo_bar", "1").unwrap_err();
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("unknown parameter")),
+            _ => panic!("expected Custom error for unknown key"),
+        }
+    }
+
+    #[test]
+    fn validate_parameter_change_bad_address_rejected() {
+        let err = validate_parameter_change("bridge_relayer", "not-an-address").unwrap_err();
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("hex address")),
+            _ => panic!("expected Custom error for bad address"),
+        }
+    }
+
+    #[test]
+    fn validate_parameter_change_bps_out_of_range() {
+        let err = validate_parameter_change("slash_double_sign_bps", "10001").unwrap_err();
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("<= 10000")),
+            _ => panic!("expected Custom error for out-of-range bps"),
+        }
+    }
+
+    #[test]
+    fn validate_parameter_change_threshold_pct_out_of_range() {
+        let err = validate_parameter_change("downtime_threshold_pct", "101").unwrap_err();
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("<= 100")),
+            _ => panic!("expected Custom error for out-of-range pct"),
+        }
+    }
+
+    #[test]
+    fn validate_parameter_change_accepts_each_whitelisted_key() {
+        validate_parameter_change(
+            "bridge_relayer",
+            "0x1111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        validate_parameter_change(
+            "treasury_address",
+            "2222222222222222222222222222222222222222",
+        )
+        .unwrap();
+        validate_parameter_change("min_gas_price", "1000000000").unwrap();
+        validate_parameter_change("base_transfer_cost", "21000").unwrap();
+        validate_parameter_change("cost_per_byte", "16").unwrap();
+        validate_parameter_change("slash_double_sign_bps", "500").unwrap();
+        validate_parameter_change("slash_downtime_bps", "10").unwrap();
+        validate_parameter_change("downtime_threshold_pct", "50").unwrap();
+        validate_parameter_change("unbonding_period_secs", "1814400").unwrap();
+    }
+
+    #[test]
+    fn apply_parameter_change_persists_override() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let pid = H256::ZERO;
+
+        apply_parameter_change(&mut state, "min_gas_price", "2000000000", &pid);
+        assert_eq!(
+            state.get_min_gas_price_override(),
+            Some(Amount::from_raw(2_000_000_000))
+        );
+
+        apply_parameter_change(&mut state, "slash_double_sign_bps", "750", &pid);
+        assert_eq!(state.get_slash_double_sign_bps_override(), Some(750));
+
+        apply_parameter_change(&mut state, "downtime_threshold_pct", "80", &pid);
+        assert_eq!(state.get_downtime_threshold_pct_override(), Some(80));
     }
 }

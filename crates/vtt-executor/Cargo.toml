@@ -16,3 +16,6 @@ borsh = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 vtt-dex = { path = "../vtt-dex" }
+
+[dev-dependencies]
+vtt-storage = { workspace = true }

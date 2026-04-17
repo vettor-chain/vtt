@@ -777,6 +777,128 @@ impl StateDB {
         }
     }
 
+    /// Get a governance-set protocol parameter override (raw bytes).
+    /// Returns `None` if not set, in which case consumers fall back to the
+    /// consensus / gas defaults baked into `ChainConfig`.
+    fn get_param_raw(&self, key: &str) -> Option<Vec<u8>> {
+        let storage = self.storage.as_ref()?;
+        let mut k = b"param:".to_vec();
+        k.extend_from_slice(key.as_bytes());
+        storage.get(Column::ChainMeta, &k).ok().flatten()
+    }
+
+    /// Set a governance-controlled protocol parameter (raw bytes).
+    fn set_param_raw(&self, key: &str, value: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let mut k = b"param:".to_vec();
+            k.extend_from_slice(key.as_bytes());
+            let _ = storage.put(Column::ChainMeta, &k, value);
+        }
+    }
+
+    /// Governance-set override for the minimum gas price (raw u128).
+    pub fn get_min_gas_price_override(&self) -> Option<Amount> {
+        let raw = self.get_param_raw("min_gas_price")?;
+        if raw.len() != 16 {
+            return None;
+        }
+        let mut buf = [0u8; 16];
+        buf.copy_from_slice(&raw);
+        Some(Amount::from_raw(u128::from_le_bytes(buf)))
+    }
+
+    pub fn set_min_gas_price(&self, value: Amount) {
+        self.set_param_raw("min_gas_price", &value.raw().to_le_bytes());
+    }
+
+    /// Governance-set override for the base transfer gas cost.
+    pub fn get_base_transfer_cost_override(&self) -> Option<u64> {
+        let raw = self.get_param_raw("base_transfer_cost")?;
+        if raw.len() != 8 {
+            return None;
+        }
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&raw);
+        Some(u64::from_le_bytes(buf))
+    }
+
+    pub fn set_base_transfer_cost(&self, value: u64) {
+        self.set_param_raw("base_transfer_cost", &value.to_le_bytes());
+    }
+
+    /// Governance-set override for the per-byte gas cost.
+    pub fn get_cost_per_byte_override(&self) -> Option<u64> {
+        let raw = self.get_param_raw("cost_per_byte")?;
+        if raw.len() != 8 {
+            return None;
+        }
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&raw);
+        Some(u64::from_le_bytes(buf))
+    }
+
+    pub fn set_cost_per_byte(&self, value: u64) {
+        self.set_param_raw("cost_per_byte", &value.to_le_bytes());
+    }
+
+    /// Governance-set override for the double-sign slash basis points.
+    pub fn get_slash_double_sign_bps_override(&self) -> Option<u16> {
+        let raw = self.get_param_raw("slash_double_sign_bps")?;
+        if raw.len() != 2 {
+            return None;
+        }
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&raw);
+        Some(u16::from_le_bytes(buf))
+    }
+
+    pub fn set_slash_double_sign_bps(&self, value: u16) {
+        self.set_param_raw("slash_double_sign_bps", &value.to_le_bytes());
+    }
+
+    /// Governance-set override for the downtime slash basis points.
+    pub fn get_slash_downtime_bps_override(&self) -> Option<u16> {
+        let raw = self.get_param_raw("slash_downtime_bps")?;
+        if raw.len() != 2 {
+            return None;
+        }
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&raw);
+        Some(u16::from_le_bytes(buf))
+    }
+
+    pub fn set_slash_downtime_bps(&self, value: u16) {
+        self.set_param_raw("slash_downtime_bps", &value.to_le_bytes());
+    }
+
+    /// Governance-set override for the downtime threshold (percentage).
+    pub fn get_downtime_threshold_pct_override(&self) -> Option<u8> {
+        let raw = self.get_param_raw("downtime_threshold_pct")?;
+        if raw.len() != 1 {
+            return None;
+        }
+        Some(raw[0])
+    }
+
+    pub fn set_downtime_threshold_pct(&self, value: u8) {
+        self.set_param_raw("downtime_threshold_pct", &[value]);
+    }
+
+    /// Governance-set override for the unbonding period in seconds.
+    pub fn get_unbonding_period_secs_override(&self) -> Option<u64> {
+        let raw = self.get_param_raw("unbonding_period_secs")?;
+        if raw.len() != 8 {
+            return None;
+        }
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&raw);
+        Some(u64::from_le_bytes(buf))
+    }
+
+    pub fn set_unbonding_period_secs(&self, value: u64) {
+        self.set_param_raw("unbonding_period_secs", &value.to_le_bytes());
+    }
+
     /// Check whether a bridge deposit with this source tx hash has already
     /// been credited on this chain. Prevents replay of relayer-submitted deposits.
     pub fn bridge_deposit_processed(&self, source_tx_hash: &H256) -> bool {
