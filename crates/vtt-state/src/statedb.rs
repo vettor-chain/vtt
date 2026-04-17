@@ -29,6 +29,14 @@ pub enum StateError {
 
 pub type Result<T> = std::result::Result<T, StateError>;
 
+/// On-disk state schema version. Bumped whenever a storage format change
+/// requires a migration. Mismatched versions refuse to start rather than
+/// silently corrupt state.
+pub const DB_SCHEMA_VERSION: u32 = 1;
+
+/// ChainMeta key holding the current schema version (little-endian u32).
+const SCHEMA_VERSION_KEY: &[u8] = b"schema:version";
+
 /// State database providing read/write access to account state.
 /// Operates on an in-memory overlay that can be committed to produce a state root.
 /// Optionally backed by a persistent `KeyValueStore` (e.g., RocksDB).
@@ -151,10 +159,49 @@ impl StateDB {
             dirty_pools: Vec::new(),
             storage: Some(storage),
         };
+        // Fail fast on an incompatible on-disk layout rather than silently
+        // corrupting state by running newer code against an older DB.
+        db.verify_or_stamp_schema_version();
         // State that doesn't fall through cache -> disk on read must be
         // eagerly loaded from storage so the restart path is consistent.
         db.load_non_fallthrough_state();
         db
+    }
+
+    /// Read the DB schema version from storage. If absent, stamp the current
+    /// version (fresh DB). If present and incompatible, panic — running a
+    /// binary against a DB of a different schema would corrupt state.
+    fn verify_or_stamp_schema_version(&self) {
+        let storage = match &self.storage {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        match storage.get(Column::ChainMeta, SCHEMA_VERSION_KEY) {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
+                let mut buf = [0u8; 4];
+                buf.copy_from_slice(&bytes);
+                let on_disk = u32::from_le_bytes(buf);
+                if on_disk != DB_SCHEMA_VERSION {
+                    panic!(
+                        "DB schema version mismatch: binary expects v{DB_SCHEMA_VERSION}, on-disk is v{on_disk}. \
+                         Refusing to start — run the matching migration or wipe the data directory.",
+                    );
+                }
+            }
+            Ok(Some(_)) => panic!(
+                "DB schema version key is corrupt (expected 4 bytes). \
+                 Refusing to start."
+            ),
+            Ok(None) => {
+                let _ = storage.put(
+                    Column::ChainMeta,
+                    SCHEMA_VERSION_KEY,
+                    &DB_SCHEMA_VERSION.to_le_bytes(),
+                );
+                tracing::info!(version = DB_SCHEMA_VERSION, "stamped DB schema version");
+            }
+            Err(e) => panic!("failed to read DB schema version: {e}"),
+        }
     }
 
     /// Create a state database with pre-loaded accounts (e.g., from genesis).
@@ -1531,6 +1578,10 @@ impl StateDB {
 
         self.storage = Some(storage);
 
+        // Stamp / verify the schema version before anything else writes through
+        // the attached storage. Panics on mismatch.
+        self.verify_or_stamp_schema_version();
+
         // Now that storage is attached, flush unbonding + slashing dedup set + KYC
         self.persist_unbonding_entries();
         self.persist_slashing_seen();
@@ -2228,5 +2279,49 @@ mod tests {
     fn finalized_block_defaults_to_zero() {
         let db = StateDB::new();
         assert_eq!(db.finalized_block(), 0);
+    }
+
+    #[test]
+    fn schema_version_stamped_on_fresh_db() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = Arc::new(InMemoryStore::new());
+        let _db = StateDB::with_storage(storage.clone());
+        let bytes = storage
+            .get(Column::ChainMeta, SCHEMA_VERSION_KEY)
+            .unwrap()
+            .expect("schema version should be stamped");
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes);
+        assert_eq!(u32::from_le_bytes(buf), DB_SCHEMA_VERSION);
+    }
+
+    #[test]
+    #[should_panic(expected = "DB schema version mismatch")]
+    fn schema_version_mismatch_panics() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = Arc::new(InMemoryStore::new());
+        // Pre-stamp a future version that this binary doesn't understand.
+        storage
+            .put(
+                Column::ChainMeta,
+                SCHEMA_VERSION_KEY,
+                &(DB_SCHEMA_VERSION + 1).to_le_bytes(),
+            )
+            .unwrap();
+        let _db = StateDB::with_storage(storage);
+    }
+
+    #[test]
+    fn schema_version_matches_passes() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = Arc::new(InMemoryStore::new());
+        storage
+            .put(
+                Column::ChainMeta,
+                SCHEMA_VERSION_KEY,
+                &DB_SCHEMA_VERSION.to_le_bytes(),
+            )
+            .unwrap();
+        let _db = StateDB::with_storage(storage);
     }
 }
