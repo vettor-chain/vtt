@@ -93,6 +93,10 @@ pub trait VttApi {
     #[method(name = "vtt_getOracle")]
     async fn get_oracle(&self, feed_id: H256) -> Result<Option<OracleFeedInfo>, ErrorObjectOwned>;
 
+    /// List all registered oracle feeds.
+    #[method(name = "vtt_listOracles")]
+    async fn list_oracles(&self) -> Result<Vec<OracleFeedInfo>, ErrorObjectOwned>;
+
     /// Submit a signed transaction. Returns the transaction hash.
     #[method(name = "vtt_sendTransaction")]
     async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned>;
@@ -508,6 +512,22 @@ impl VttApiServer for VttRpcImpl {
             quorum: f.quorum,
             sources: f.authorized_sources.len(),
         }))
+    }
+
+    async fn list_oracles(&self) -> Result<Vec<OracleFeedInfo>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain
+            .state()
+            .iter_oracles()
+            .map(|(_, f)| OracleFeedInfo {
+                feed_id: f.feed_id,
+                name: f.name.clone(),
+                latest_value: f.latest_value,
+                updated_at: f.updated_at,
+                quorum: f.quorum,
+                sources: f.authorized_sources.len(),
+            })
+            .collect())
     }
 
     async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned> {

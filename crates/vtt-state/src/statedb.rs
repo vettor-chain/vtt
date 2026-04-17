@@ -586,6 +586,11 @@ impl StateDB {
         self.oracles.len()
     }
 
+    /// Iterate over all registered oracle feeds.
+    pub fn iter_oracles(&self) -> impl Iterator<Item = (&H256, &OracleFeed)> {
+        self.oracles.iter()
+    }
+
     /// Submit an oracle value to an existing feed, persisting the updated
     /// feed back to storage on success.
     ///
