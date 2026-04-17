@@ -1543,14 +1543,11 @@ fn tx_to_info(
     }
 }
 
-/// Collect all transactions from canonical blocks (most recent first).
-///
-/// TODO: This iterates the entire chain on every call, which is O(blocks * txs).
-/// Replace with a persistent transaction index (e.g. address -> Vec<TxHash>)
-/// backed by the storage layer to support efficient pagination without full scans.
 /// Walk recent blocks (newest first), collecting transactions that pass
 /// `accept`, and stop as soon as `cap` entries are gathered. Bounded by
-/// `MAX_BLOCK_SCAN_DEPTH`.
+/// `MAX_BLOCK_SCAN_DEPTH`. Callers now pass a `cap` of
+/// `(page + 1) * limit` so the scan short-circuits after enough matches,
+/// which supersedes the earlier full-chain sweep.
 fn collect_txs_until<F: Fn(&TransactionInfo) -> bool>(
     chain: &Chain,
     accept: F,
