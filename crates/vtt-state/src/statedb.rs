@@ -982,6 +982,17 @@ impl StateDB {
         self.set_param_raw("unbonding_period_secs", &value.to_le_bytes());
     }
 
+    /// Effective unbonding period in milliseconds. Reads the governance-set
+    /// override when present, otherwise falls back to the supplied default.
+    /// Callers that don't carry `ConsensusParams` can pass the built-in
+    /// 21-day fallback.
+    pub fn effective_unbonding_period_ms(&self, fallback_secs: u64) -> u64 {
+        let secs = self
+            .get_unbonding_period_secs_override()
+            .unwrap_or(fallback_secs);
+        secs.saturating_mul(1_000)
+    }
+
     /// Governance-set maximum unique holders allowed per tokenized asset.
     /// 0 or unset = unlimited.
     pub fn get_max_holders_per_asset(&self) -> u32 {

@@ -520,6 +520,15 @@ impl Chain {
                     let _ = storage.put(Column::Receipts, receipt.tx_hash.as_bytes(), &bytes);
                 }
             }
+            // Index tx_hash -> (block_number, tx_index) so the explorer can
+            // resolve getTransaction(hash) in O(1) instead of scanning blocks.
+            for (idx, tx) in block.transactions.iter().enumerate() {
+                let tx_hash = vtt_crypto::blake3_hash(&tx.payload_bytes());
+                let mut v = Vec::with_capacity(12);
+                v.extend_from_slice(&block.header.number.to_le_bytes());
+                v.extend_from_slice(&(idx as u32).to_le_bytes());
+                let _ = storage.put(Column::Transactions, tx_hash.as_bytes(), &v);
+            }
         }
         self.headers.insert(block_hash, block.header.clone());
         self.bodies.insert(block_hash, block.clone());
@@ -625,6 +634,26 @@ impl Chain {
         self.canonical
             .get(&number)
             .and_then(|hash| self.bodies.get(hash))
+    }
+
+    /// Resolve a tx hash to its canonical (block_number, tx_index) location
+    /// via the Column::Transactions index populated at import time. Returns
+    /// `None` when the tx is unknown (or was imported before the index was
+    /// introduced).
+    pub fn get_tx_location(&self, tx_hash: &H256) -> Option<(BlockNumber, u32)> {
+        let storage = self.storage.as_ref()?;
+        let v = storage
+            .get(Column::Transactions, tx_hash.as_bytes())
+            .ok()
+            .flatten()?;
+        if v.len() != 12 {
+            return None;
+        }
+        let mut bn = [0u8; 8];
+        bn.copy_from_slice(&v[..8]);
+        let mut ti = [0u8; 4];
+        ti.copy_from_slice(&v[8..]);
+        Some((BlockNumber::from_le_bytes(bn), u32::from_le_bytes(ti)))
     }
 
     /// Get the current block height (head block number).

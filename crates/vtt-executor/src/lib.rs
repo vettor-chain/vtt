@@ -868,6 +868,19 @@ fn execute_create_oracle_feed(
             "oracle feed must have between 1 and 32 authorized sources".into(),
         ));
     }
+    // Reject duplicate sources: the submit path dedupes by source, so duplicates
+    // would just waste space and could mislead callers into picking a quorum
+    // the feed can never actually reach.
+    {
+        let mut seen = std::collections::HashSet::with_capacity(authorized_sources.len());
+        for a in authorized_sources {
+            if !seen.insert(*a) {
+                return Err(ExecutionError::Custom(
+                    "oracle authorized_sources contains duplicates".into(),
+                ));
+            }
+        }
+    }
     if quorum == 0 || (quorum as usize) > authorized_sources.len() {
         return Err(ExecutionError::Custom(
             "oracle quorum must be between 1 and the number of authorized sources".into(),
@@ -1173,7 +1186,7 @@ fn execute_stake(
 }
 
 /// Default unbonding period: 21 days in milliseconds.
-const DEFAULT_UNBONDING_PERIOD_MS: u64 = 21 * 24 * 3600 * 1000;
+const DEFAULT_UNBONDING_PERIOD_SECS: u64 = 21 * 24 * 3600;
 
 /// Execute an unstaking operation.
 /// Tokens are not returned immediately; instead an unbonding entry is created
@@ -1226,8 +1239,10 @@ fn execute_unstake(
 
     // Create an unbonding entry instead of returning VTT immediately.
     // The funds will be released when process_unbonding() is called at a
-    // block whose timestamp >= completion_time.
-    let completion_time = block_timestamp + DEFAULT_UNBONDING_PERIOD_MS;
+    // block whose timestamp >= completion_time. The effective period honours
+    // any governance-set `unbonding_period_secs` override.
+    let completion_time =
+        block_timestamp + state.effective_unbonding_period_ms(DEFAULT_UNBONDING_PERIOD_SECS);
     state.add_unbonding_entry(
         *sender,
         vtt_state::account::UnbondingEntry {
@@ -2482,12 +2497,15 @@ fn validate_parameter_change(key: &str, value: &str) -> Result<(), ExecutionErro
 /// Apply a validated ParameterChange to state. Values already passed
 /// `validate_parameter_change` at propose time; a parse failure here would only
 /// come from a corrupt persisted proposal, in which case we log and skip.
+/// All successful mutations are emitted at INFO level (not debug) so node
+/// operators can audit governance-driven parameter drift from logs.
 fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_id: &H256) {
+    use tracing::info;
     match key {
         "bridge_relayer" => {
             if let Some(addr) = parse_address(value) {
                 state.set_bridge_relayer(addr);
-                debug!(?proposal_id, %addr, "bridge_relayer updated");
+                info!(?proposal_id, %addr, event="ParameterChanged", key="bridge_relayer", "bridge_relayer updated");
             } else {
                 debug!(
                     ?proposal_id,
@@ -2498,32 +2516,56 @@ fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_
         "treasury_address" => {
             if let Some(addr) = parse_address(value) {
                 state.set_treasury_address(addr);
-                debug!(?proposal_id, %addr, "treasury_address updated");
+                info!(?proposal_id, %addr, event="ParameterChanged", key="treasury_address", "treasury_address updated");
             }
         }
         "min_gas_price" => {
             if let Ok(v) = value.trim().parse::<u128>() {
                 state.set_min_gas_price(Amount::from_raw(v));
-                debug!(?proposal_id, v, "min_gas_price updated");
+                info!(
+                    ?proposal_id,
+                    v,
+                    event = "ParameterChanged",
+                    key = "min_gas_price",
+                    "min_gas_price updated"
+                );
             }
         }
         "base_transfer_cost" => {
             if let Ok(v) = value.trim().parse::<u64>() {
                 state.set_base_transfer_cost(v);
-                debug!(?proposal_id, v, "base_transfer_cost updated");
+                info!(
+                    ?proposal_id,
+                    v,
+                    event = "ParameterChanged",
+                    key = "base_transfer_cost",
+                    "base_transfer_cost updated"
+                );
             }
         }
         "cost_per_byte" => {
             if let Ok(v) = value.trim().parse::<u64>() {
                 state.set_cost_per_byte(v);
-                debug!(?proposal_id, v, "cost_per_byte updated");
+                info!(
+                    ?proposal_id,
+                    v,
+                    event = "ParameterChanged",
+                    key = "cost_per_byte",
+                    "cost_per_byte updated"
+                );
             }
         }
         "slash_double_sign_bps" => {
             if let Ok(v) = value.trim().parse::<u16>() {
                 if v <= 10_000 {
                     state.set_slash_double_sign_bps(v);
-                    debug!(?proposal_id, v, "slash_double_sign_bps updated");
+                    info!(
+                        ?proposal_id,
+                        v,
+                        event = "ParameterChanged",
+                        key = "slash_double_sign_bps",
+                        "slash_double_sign_bps updated"
+                    );
                 }
             }
         }
@@ -2531,7 +2573,13 @@ fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_
             if let Ok(v) = value.trim().parse::<u16>() {
                 if v <= 10_000 {
                     state.set_slash_downtime_bps(v);
-                    debug!(?proposal_id, v, "slash_downtime_bps updated");
+                    info!(
+                        ?proposal_id,
+                        v,
+                        event = "ParameterChanged",
+                        key = "slash_downtime_bps",
+                        "slash_downtime_bps updated"
+                    );
                 }
             }
         }
@@ -2539,29 +2587,59 @@ fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_
             if let Ok(v) = value.trim().parse::<u8>() {
                 if v <= 100 {
                     state.set_downtime_threshold_pct(v);
-                    debug!(?proposal_id, v, "downtime_threshold_pct updated");
+                    info!(
+                        ?proposal_id,
+                        v,
+                        event = "ParameterChanged",
+                        key = "downtime_threshold_pct",
+                        "downtime_threshold_pct updated"
+                    );
                 }
             }
         }
         "unbonding_period_secs" => {
             if let Ok(v) = value.trim().parse::<u64>() {
                 state.set_unbonding_period_secs(v);
-                debug!(?proposal_id, v, "unbonding_period_secs updated");
+                info!(
+                    ?proposal_id,
+                    v,
+                    event = "ParameterChanged",
+                    key = "unbonding_period_secs",
+                    "unbonding_period_secs updated"
+                );
             }
         }
         "max_holders_per_asset" => {
             if let Ok(v) = value.trim().parse::<u32>() {
                 state.set_max_holders_per_asset(v);
-                debug!(?proposal_id, v, "max_holders_per_asset updated");
+                info!(
+                    ?proposal_id,
+                    v,
+                    event = "ParameterChanged",
+                    key = "max_holders_per_asset",
+                    "max_holders_per_asset updated"
+                );
             }
         }
         "jurisdiction_whitelist" => {
             state.set_jurisdiction_whitelist(value);
-            debug!(?proposal_id, value, "jurisdiction_whitelist updated");
+            info!(
+                ?proposal_id,
+                value,
+                event = "ParameterChanged",
+                key = "jurisdiction_whitelist",
+                "jurisdiction_whitelist updated"
+            );
         }
         "jurisdiction_blacklist" => {
             state.set_jurisdiction_blacklist(value);
-            debug!(?proposal_id, value, "jurisdiction_blacklist updated");
+            info!(
+                ?proposal_id,
+                value,
+                event = "ParameterChanged",
+                key = "jurisdiction_blacklist",
+                "jurisdiction_blacklist updated"
+            );
         }
         other => {
             debug!(

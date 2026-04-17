@@ -307,9 +307,12 @@ fn internal_err<E: std::fmt::Display>(ctx: &str, err: E) -> ErrorObjectOwned {
 }
 
 /// Maximum hex length accepted by sendTransaction. Anything larger is rejected
-/// before allocating the decoded buffer. 256 KiB of hex decodes to 128 KiB of
-/// bytes, which is far larger than any well-formed signed transaction.
-const MAX_TX_HEX_LEN: usize = 256 * 1024;
+/// before allocating the decoded buffer. 2 MiB of hex decodes to ~1 MiB of
+/// bytes — enough headroom for the largest reasonable DeployContract WASM
+/// payloads while still being well under the 1 MB HTTP body limit (the hex
+/// itself arrives inside a JSON-RPC envelope, so the body limit effectively
+/// caps hex_len at ~1.8 MiB regardless of this constant).
+const MAX_TX_HEX_LEN: usize = 2 * 1024 * 1024;
 
 /// Upper bound on the number of recent blocks scanned by RPC methods that
 /// need to walk the chain (e.g. get_transaction, get_bridge_withdrawals).
@@ -317,6 +320,20 @@ const MAX_TX_HEX_LEN: usize = 256 * 1024;
 /// chain grows; until then this cap prevents a single request from pinning
 /// the read lock on a long scan.
 const MAX_BLOCK_SCAN_DEPTH: u64 = 20_000;
+
+/// Gate expensive read RPCs behind a dedicated per-IP token bucket. Cheap
+/// reads (getBalance, chainStatus, getBlockByNumber) skip this check.
+fn check_heavy_read(state: &RpcState) -> Result<(), ErrorObjectOwned> {
+    let client_ip: IpAddr = "127.0.0.1".parse().unwrap();
+    if !state.heavy_read_limiter.check(client_ip) {
+        return Err(ErrorObjectOwned::owned(
+            -32005,
+            "Rate limit exceeded",
+            None::<()>,
+        ));
+    }
+    Ok(())
+}
 
 /// Helper: acquire a write lock on the chain, returning a JSON-RPC internal error on lock poisoning.
 #[allow(dead_code)]
@@ -358,6 +375,8 @@ pub struct RpcState {
     pub metrics: Option<Arc<NodeMetrics>>,
     /// Per-IP rate limiter for sendTransaction.
     pub send_tx_limiter: PerIpRateLimiter,
+    /// Per-IP rate limiter for expensive read RPCs that walk the chain.
+    pub heavy_read_limiter: PerIpRateLimiter,
 }
 
 /// Implementation of the VTT JSON-RPC API.
@@ -754,12 +773,16 @@ impl VttApiServer for VttRpcImpl {
         page: usize,
         limit: usize,
     ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
+        check_heavy_read(&self.state)?;
         let limit = limit.min(100); // cap to prevent resource exhaustion
         let chain = read_chain(&self.state.chain)?;
-        let all = collect_all_txs(&chain);
-        let total = all.len();
+        // Bound the scan to just what this page needs instead of materialising
+        // every tx from the last 20k blocks on every request.
+        let need = (page + 1).saturating_mul(limit);
+        let collected = collect_txs_until(&chain, |_| true, need);
+        let total = collected.len();
         let start = page * limit;
-        let items = all.into_iter().skip(start).take(limit).collect();
+        let items = collected.into_iter().skip(start).take(limit).collect();
         Ok(PaginatedResult {
             items,
             total,
@@ -773,6 +796,20 @@ impl VttApiServer for VttRpcImpl {
         hash: H256,
     ) -> Result<Option<TransactionInfo>, ErrorObjectOwned> {
         let chain = read_chain(&self.state.chain)?;
+        // O(1) via the tx_hash -> (block_number, tx_index) index populated at
+        // import time. Falls back to a bounded linear scan for transactions
+        // imported before the index was introduced (legacy testnet blocks).
+        if let Some((n, idx)) = chain.get_tx_location(&hash) {
+            if let Some(block) = chain.get_block_by_number(n) {
+                if let Some(tx) = block.transactions.get(idx as usize) {
+                    return Ok(Some(tx_to_info(
+                        tx,
+                        block.header.number,
+                        block.header.timestamp,
+                    )));
+                }
+            }
+        }
         let height = chain.height().unwrap_or(0);
         let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
         for n in (min..=height).rev() {
@@ -798,12 +835,15 @@ impl VttApiServer for VttRpcImpl {
         page: usize,
         limit: usize,
     ) -> Result<PaginatedResult<TransactionInfo>, ErrorObjectOwned> {
+        check_heavy_read(&self.state)?;
         let limit = limit.min(100); // cap to prevent resource exhaustion
         let chain = read_chain(&self.state.chain)?;
-        let all: Vec<TransactionInfo> = collect_all_txs(&chain)
-            .into_iter()
-            .filter(|tx| tx.from == address || tx.to == Some(address))
-            .collect();
+        let need = (page + 1).saturating_mul(limit);
+        let all = collect_txs_until(
+            &chain,
+            |tx| tx.from == address || tx.to == Some(address),
+            need,
+        );
         let total = all.len();
         let start = page * limit;
         let items = all.into_iter().skip(start).take(limit).collect();
@@ -838,6 +878,7 @@ impl VttApiServer for VttRpcImpl {
     async fn get_bridge_withdrawals(&self) -> Result<Vec<BridgeWithdrawalInfo>, ErrorObjectOwned> {
         use vtt_primitives::transaction::TransactionAction;
 
+        check_heavy_read(&self.state)?;
         let chain = read_chain(&self.state.chain)?;
         let height = chain.height().unwrap_or(0);
         let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
@@ -1411,16 +1452,32 @@ fn tx_to_info(
 /// TODO: This iterates the entire chain on every call, which is O(blocks * txs).
 /// Replace with a persistent transaction index (e.g. address -> Vec<TxHash>)
 /// backed by the storage layer to support efficient pagination without full scans.
-fn collect_all_txs(chain: &Chain) -> Vec<TransactionInfo> {
+/// Walk recent blocks (newest first), collecting transactions that pass
+/// `accept`, and stop as soon as `cap` entries are gathered. Bounded by
+/// `MAX_BLOCK_SCAN_DEPTH`.
+fn collect_txs_until<F: Fn(&TransactionInfo) -> bool>(
+    chain: &Chain,
+    accept: F,
+    cap: usize,
+) -> Vec<TransactionInfo> {
     let height = chain.height().unwrap_or(0);
     let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
     let mut txs = Vec::new();
     for n in (min..=height).rev() {
+        if txs.len() >= cap {
+            break;
+        }
         if let Some(block) = chain.get_block_by_number(n) {
             let ts = block.header.timestamp;
             let bn = block.header.number;
             for tx in &block.transactions {
-                txs.push(tx_to_info(tx, bn, ts));
+                let info = tx_to_info(tx, bn, ts);
+                if accept(&info) {
+                    txs.push(info);
+                    if txs.len() >= cap {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1496,6 +1553,7 @@ impl RpcServer {
                 total_minted_milli: AtomicU64::new(0),
                 metrics: None,
                 send_tx_limiter: PerIpRateLimiter::new(10),
+                heavy_read_limiter: PerIpRateLimiter::new(60),
             }),
         }
     }
@@ -1514,6 +1572,7 @@ impl RpcServer {
                 total_minted_milli: AtomicU64::new(0),
                 metrics: Some(metrics),
                 send_tx_limiter: PerIpRateLimiter::new(10),
+                heavy_read_limiter: PerIpRateLimiter::new(60),
             }),
         }
     }
@@ -1536,8 +1595,10 @@ impl RpcServer {
             .allow_methods([hyper::Method::POST])
             .allow_headers([hyper::header::CONTENT_TYPE]);
 
-        // Request body size limit: 1 MB.
-        let body_limit = RequestBodyLimitLayer::new(1024 * 1024);
+        // Request body size limit: 4 MiB. Sized to accommodate the largest
+        // reasonable DeployContract tx (up to ~2 MiB of hex-encoded WASM)
+        // plus JSON-RPC envelope overhead.
+        let body_limit = RequestBodyLimitLayer::new(4 * 1024 * 1024);
 
         // Order: body_limit is innermost (applied first to the service),
         // CORS is outermost (applied last, intercepts preflight OPTIONS before body limit).
