@@ -222,24 +222,27 @@ impl StateDB {
     }
 
     /// Rebuild the stakers index from the given source StateDB (typically the
-    /// fresh genesis_state passed to init_genesis). Imports each staker's
-    /// account into this cache so elect_validators sees them. Does NOT
-    /// overwrite existing account state on disk when this cache already has
-    /// a more recent copy.
+    /// fresh genesis_state passed to init_genesis). For each staker, warms
+    /// this StateDB's account cache either from disk (if the address already
+    /// has state there) or from the source (for truly fresh chains). The cache
+    /// population is required because elect_validators iterates the in-memory
+    /// `accounts` HashMap and doesn't fall through to storage.
     pub fn bootstrap_stakers_from(&mut self, source: &StateDB) {
         for (addr, acc) in &source.accounts {
-            if let Some(ref s) = acc.staking {
-                if !s.self_stake.is_zero() {
-                    // If we already have state for this address on disk, prefer
-                    // that (it may carry deltas from staking/unstaking events).
-                    let existing = self.get_account(addr);
-                    if existing.staking.is_none() {
-                        self.put_account(*addr, acc.clone());
-                    } else {
-                        self.stakers.insert(*addr);
-                    }
-                }
+            let Some(ref s) = acc.staking else { continue };
+            if s.self_stake.is_zero() {
+                continue;
             }
+            // Load the on-disk account (if any) to preserve deltas from
+            // previous staking/unstaking events; otherwise use the source.
+            let existing = self.get_account(addr);
+            let account_to_cache = if existing.staking.is_some() {
+                existing
+            } else {
+                acc.clone()
+            };
+            self.accounts.insert(*addr, account_to_cache);
+            self.stakers.insert(*addr);
         }
         self.persist_stakers();
     }
