@@ -1330,6 +1330,14 @@ fn tx_to_info(
                 None,
                 None,
             ),
+            TransactionAction::SetAddressJurisdiction { address, .. } => (
+                "SetAddressJurisdiction".to_string(),
+                Some(*address),
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
         };
 
     TransactionInfo {

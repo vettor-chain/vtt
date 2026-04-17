@@ -234,6 +234,16 @@ pub enum TransactionAction {
         /// Amount to credit (net of fees).
         amount: Amount,
     },
+
+    /// Set the jurisdiction (ISO 3166-1 alpha-2 country code, e.g. "IT", "DE")
+    /// for an address. Callable only by the treasury / admin address.
+    /// Governance-set jurisdiction_whitelist / jurisdiction_blacklist lists
+    /// are enforced at AssetTransfer time against this mapping.
+    /// Empty `country` clears the mapping.
+    SetAddressJurisdiction {
+        address: Address,
+        country: String,
+    },
 }
 
 /// Payload for cross-chain transfers.

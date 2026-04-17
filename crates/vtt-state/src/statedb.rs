@@ -899,6 +899,63 @@ impl StateDB {
         self.set_param_raw("unbonding_period_secs", &value.to_le_bytes());
     }
 
+    /// Governance-set maximum unique holders allowed per tokenized asset.
+    /// 0 or unset = unlimited.
+    pub fn get_max_holders_per_asset(&self) -> u32 {
+        let raw = match self.get_param_raw("max_holders_per_asset") {
+            Some(r) if r.len() == 4 => r,
+            _ => return 0,
+        };
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&raw);
+        u32::from_le_bytes(buf)
+    }
+
+    pub fn set_max_holders_per_asset(&self, value: u32) {
+        self.set_param_raw("max_holders_per_asset", &value.to_le_bytes());
+    }
+
+    /// Governance-set jurisdiction whitelist (ISO 3166-1 alpha-2 codes).
+    /// Empty = no whitelist restriction. Stored as comma-separated ascii.
+    pub fn get_jurisdiction_whitelist(&self) -> Vec<String> {
+        decode_country_list(self.get_param_raw("jurisdiction_whitelist"))
+    }
+
+    pub fn set_jurisdiction_whitelist(&self, codes_csv: &str) {
+        self.set_param_raw("jurisdiction_whitelist", codes_csv.as_bytes());
+    }
+
+    /// Governance-set jurisdiction blacklist. Empty = no blacklist.
+    pub fn get_jurisdiction_blacklist(&self) -> Vec<String> {
+        decode_country_list(self.get_param_raw("jurisdiction_blacklist"))
+    }
+
+    pub fn set_jurisdiction_blacklist(&self, codes_csv: &str) {
+        self.set_param_raw("jurisdiction_blacklist", codes_csv.as_bytes());
+    }
+
+    /// Get the jurisdiction (ISO 3166-1 alpha-2) recorded for an address, if any.
+    pub fn get_address_jurisdiction(&self, addr: &Address) -> Option<String> {
+        let storage = self.storage.as_ref()?;
+        let mut k = b"jur:".to_vec();
+        k.extend_from_slice(addr.as_bytes());
+        let bytes = storage.get(Column::ChainMeta, &k).ok().flatten()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    /// Set the jurisdiction code for an address. Empty clears the mapping.
+    pub fn set_address_jurisdiction(&self, addr: &Address, country: &str) {
+        if let Some(ref storage) = self.storage {
+            let mut k = b"jur:".to_vec();
+            k.extend_from_slice(addr.as_bytes());
+            if country.is_empty() {
+                let _ = storage.delete(Column::ChainMeta, &k);
+            } else {
+                let _ = storage.put(Column::ChainMeta, &k, country.as_bytes());
+            }
+        }
+    }
+
     /// Check whether a bridge deposit with this source tx hash has already
     /// been credited on this chain. Prevents replay of relayer-submitted deposits.
     pub fn bridge_deposit_processed(&self, source_tx_hash: &H256) -> bool {
@@ -1850,6 +1907,22 @@ impl Default for StateDB {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Parse a comma-separated list of country codes into an uppercased Vec<String>.
+/// Empty codes are skipped.
+fn decode_country_list(bytes: Option<Vec<u8>>) -> Vec<String> {
+    let Some(bytes) = bytes else {
+        return Vec::new();
+    };
+    let s = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    s.split(',')
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| !c.is_empty())
+        .collect()
 }
 
 /// A snapshot of the state for rollback.

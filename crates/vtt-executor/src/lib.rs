@@ -388,6 +388,9 @@ fn execute_action(
                     ));
                 }
             }
+            check_jurisdiction_policy(state, sender)?;
+            check_jurisdiction_policy(state, to)?;
+            check_max_holders(state, asset_id, to)?;
             state.transfer_asset(asset_id, sender, to, *amount)?;
             Ok(vec![Log {
                 address: *sender,
@@ -659,6 +662,10 @@ fn execute_action(
             token,
             *amount,
         ),
+
+        TransactionAction::SetAddressJurisdiction { address, country } => {
+            execute_set_address_jurisdiction(state, sender, address, country)
+        }
     }
 }
 
@@ -800,6 +807,41 @@ fn execute_set_kyc_approval(
         address: *sender,
         topics: vec![blake3_hash(b"SetKycApproval")],
         data: borsh::to_vec(&(*address, approved)).unwrap_or_default(),
+    }])
+}
+
+/// Record the jurisdiction (ISO 3166-1 alpha-2 country code) for an address.
+/// Treasury-gated, same pattern as `SetKycApproval`. Empty string clears the
+/// mapping. Used by the jurisdiction_whitelist / jurisdiction_blacklist gates
+/// enforced at AssetTransfer time.
+fn execute_set_address_jurisdiction(
+    state: &mut StateDB,
+    sender: &Address,
+    address: &Address,
+    country: &str,
+) -> Result<Vec<Log>, ExecutionError> {
+    let treasury = state.get_treasury_address();
+    if *sender != treasury {
+        return Err(ExecutionError::Custom(
+            "only the treasury / admin can set address jurisdiction".into(),
+        ));
+    }
+    let country_upper = country.trim().to_ascii_uppercase();
+    if !country_upper.is_empty() && country_upper.len() != 2 {
+        return Err(ExecutionError::Custom(
+            "jurisdiction must be an ISO 3166-1 alpha-2 code (2 letters) or empty".into(),
+        ));
+    }
+    if !country_upper.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(ExecutionError::Custom(
+            "jurisdiction must contain only ASCII letters".into(),
+        ));
+    }
+    state.set_address_jurisdiction(address, &country_upper);
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"SetAddressJurisdiction")],
+        data: borsh::to_vec(&(*address, country_upper)).unwrap_or_default(),
     }])
 }
 
@@ -1948,6 +1990,7 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::FundRedemptionPool { .. } => 50_000,
         TransactionAction::ClaimRedemption { .. } => 80_000,
         TransactionAction::SetKycApproval { .. } => 30_000,
+        TransactionAction::SetAddressJurisdiction { .. } => 30_000,
     }
 }
 
@@ -2223,9 +2266,28 @@ fn validate_parameter_change(key: &str, value: &str) -> Result<(), ExecutionErro
                 )));
             }
         }
+        "max_holders_per_asset" => {
+            value.trim().parse::<u32>().map_err(|_| {
+                ExecutionError::Custom(format!(
+                    "ParameterChange '{key}': value must be a u32 (0 = unlimited)",
+                ))
+            })?;
+        }
+        "jurisdiction_whitelist" | "jurisdiction_blacklist" => {
+            for code in value.split(',').map(|c| c.trim()) {
+                if code.is_empty() {
+                    continue;
+                }
+                if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
+                    return Err(ExecutionError::Custom(format!(
+                        "ParameterChange '{key}': '{code}' is not a valid ISO 3166-1 alpha-2 code",
+                    )));
+                }
+            }
+        }
         other => {
             return Err(ExecutionError::Custom(format!(
-                "ParameterChange: unknown parameter '{other}'. Allowed: bridge_relayer, treasury_address, min_gas_price, base_transfer_cost, cost_per_byte, slash_double_sign_bps, slash_downtime_bps, downtime_threshold_pct, unbonding_period_secs",
+                "ParameterChange: unknown parameter '{other}'. Allowed: bridge_relayer, treasury_address, min_gas_price, base_transfer_cost, cost_per_byte, slash_double_sign_bps, slash_downtime_bps, downtime_threshold_pct, unbonding_period_secs, max_holders_per_asset, jurisdiction_whitelist, jurisdiction_blacklist",
             )));
         }
     }
@@ -2302,6 +2364,20 @@ fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_
                 debug!(?proposal_id, v, "unbonding_period_secs updated");
             }
         }
+        "max_holders_per_asset" => {
+            if let Ok(v) = value.trim().parse::<u32>() {
+                state.set_max_holders_per_asset(v);
+                debug!(?proposal_id, v, "max_holders_per_asset updated");
+            }
+        }
+        "jurisdiction_whitelist" => {
+            state.set_jurisdiction_whitelist(value);
+            debug!(?proposal_id, value, "jurisdiction_whitelist updated");
+        }
+        "jurisdiction_blacklist" => {
+            state.set_jurisdiction_blacklist(value);
+            debug!(?proposal_id, value, "jurisdiction_blacklist updated");
+        }
         other => {
             debug!(
                 key = other,
@@ -2310,6 +2386,71 @@ fn apply_parameter_change(state: &mut StateDB, key: &str, value: &str, proposal_
             );
         }
     }
+}
+
+/// Enforce chain-wide jurisdiction whitelist / blacklist against an address'
+/// recorded country code.
+/// - Whitelist empty → no whitelist check.
+/// - Whitelist non-empty → address must have a jurisdiction set and it must
+///   be in the whitelist.
+/// - Blacklist is always checked if the address has a jurisdiction.
+fn check_jurisdiction_policy(state: &StateDB, addr: &Address) -> Result<(), ExecutionError> {
+    let whitelist = state.get_jurisdiction_whitelist();
+    let blacklist = state.get_jurisdiction_blacklist();
+    if whitelist.is_empty() && blacklist.is_empty() {
+        return Ok(());
+    }
+    let jur = state
+        .get_address_jurisdiction(addr)
+        .map(|c| c.to_ascii_uppercase());
+    if !whitelist.is_empty() {
+        let Some(ref code) = jur else {
+            return Err(ExecutionError::Custom(format!(
+                "address {addr} has no jurisdiction set; chain requires whitelisted jurisdiction",
+            )));
+        };
+        if !whitelist.iter().any(|c| c.eq_ignore_ascii_case(code)) {
+            return Err(ExecutionError::Custom(format!(
+                "jurisdiction '{code}' is not in the chain whitelist",
+            )));
+        }
+    }
+    if let Some(code) = jur {
+        if blacklist.iter().any(|c| c.eq_ignore_ascii_case(&code)) {
+            return Err(ExecutionError::Custom(format!(
+                "jurisdiction '{code}' is blacklisted on this chain",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Enforce chain-wide `max_holders_per_asset`. Skipped when recipient already
+/// holds a non-zero balance of the asset (existing holder, transfer doesn't
+/// grow the holder set).
+fn check_max_holders(
+    state: &StateDB,
+    asset_id: &H256,
+    recipient: &Address,
+) -> Result<(), ExecutionError> {
+    let max = state.get_max_holders_per_asset();
+    if max == 0 {
+        return Ok(());
+    }
+    let recipient_holding = state.get_ownership(asset_id, recipient);
+    if !recipient_holding.total().is_zero() {
+        return Ok(());
+    }
+    let current_holders = state
+        .iter_ownership_for_asset(asset_id)
+        .filter(|o| !o.total().is_zero())
+        .count() as u32;
+    if current_holders >= max {
+        return Err(ExecutionError::Custom(format!(
+            "asset has reached max_holders_per_asset ({max}); recipient is a new holder",
+        )));
+    }
+    Ok(())
 }
 
 fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {
@@ -2869,5 +3010,108 @@ mod tests {
 
         apply_parameter_change(&mut state, "downtime_threshold_pct", "80", &pid);
         assert_eq!(state.get_downtime_threshold_pct_override(), Some(80));
+    }
+
+    #[test]
+    fn validate_parameter_change_compliance_keys() {
+        validate_parameter_change("max_holders_per_asset", "100").unwrap();
+        validate_parameter_change("jurisdiction_whitelist", "IT,DE,FR").unwrap();
+        validate_parameter_change("jurisdiction_blacklist", "KP,IR").unwrap();
+        let err = validate_parameter_change("jurisdiction_whitelist", "ITA").unwrap_err();
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("alpha-2")),
+            _ => panic!("expected Custom error for bad country code"),
+        }
+    }
+
+    #[test]
+    fn check_jurisdiction_policy_without_policy_is_allowed() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let state = StateDB::with_storage(storage);
+        let addr = Address::from([0x11; 20]);
+        assert!(check_jurisdiction_policy(&state, &addr).is_ok());
+    }
+
+    #[test]
+    fn check_jurisdiction_policy_whitelist_enforced() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let state = StateDB::with_storage(storage);
+        state.set_jurisdiction_whitelist("IT,DE");
+
+        let it_addr = Address::from([0x11; 20]);
+        state.set_address_jurisdiction(&it_addr, "IT");
+        assert!(check_jurisdiction_policy(&state, &it_addr).is_ok());
+
+        let us_addr = Address::from([0x22; 20]);
+        state.set_address_jurisdiction(&us_addr, "US");
+        assert!(check_jurisdiction_policy(&state, &us_addr).is_err());
+
+        // Address with no jurisdiction set, when whitelist is active, is rejected
+        let unknown = Address::from([0x33; 20]);
+        assert!(check_jurisdiction_policy(&state, &unknown).is_err());
+    }
+
+    #[test]
+    fn check_jurisdiction_policy_blacklist_enforced() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let state = StateDB::with_storage(storage);
+        state.set_jurisdiction_blacklist("KP,IR");
+
+        let kp_addr = Address::from([0x44; 20]);
+        state.set_address_jurisdiction(&kp_addr, "KP");
+        assert!(check_jurisdiction_policy(&state, &kp_addr).is_err());
+
+        // Address with no jurisdiction + only blacklist = allowed (unrestricted)
+        let unknown = Address::from([0x55; 20]);
+        assert!(check_jurisdiction_policy(&state, &unknown).is_ok());
+    }
+
+    #[test]
+    fn set_address_jurisdiction_requires_treasury() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let target = Address::from([0xBB; 20]);
+        let impostor = Address::from([0xCC; 20]);
+
+        let err = execute_set_address_jurisdiction(&mut state, &impostor, &target, "IT")
+            .expect_err("non-treasury must fail");
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("treasury")),
+            _ => panic!("expected Custom error"),
+        }
+
+        execute_set_address_jurisdiction(&mut state, &treasury, &target, "IT").unwrap();
+        assert_eq!(
+            state.get_address_jurisdiction(&target).as_deref(),
+            Some("IT")
+        );
+
+        // Clear by passing empty string
+        execute_set_address_jurisdiction(&mut state, &treasury, &target, "").unwrap();
+        assert_eq!(state.get_address_jurisdiction(&target), None);
+    }
+
+    #[test]
+    fn set_address_jurisdiction_rejects_bad_code() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let target = Address::from([0xBB; 20]);
+        let err = execute_set_address_jurisdiction(&mut state, &treasury, &target, "ITA")
+            .expect_err("3-letter code must fail");
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("alpha-2")),
+            _ => panic!("expected Custom error"),
+        }
     }
 }
