@@ -182,6 +182,10 @@ pub struct OracleFeedInfo {
     pub updated_at: u64,
     pub quorum: u8,
     pub sources: usize,
+    /// Number of decimal places the raw `latest_value` is scaled by.
+    /// Consumers should divide by `10^decimals` to recover the real number.
+    #[serde(default)]
+    pub decimals: u8,
 }
 
 /// RPC response for transaction info.

@@ -190,14 +190,48 @@ impl Chain {
             // state_root. A mismatch indicates corrupted RocksDB data or a
             // schema drift — producing blocks from here would yield invalid
             // state roots that other nodes reject.
+            //
+            // To avoid spamming the log across restarts after a one-time
+            // schema change (e.g. compute_state_root was extended to cover
+            // new columns), we remember the first block where a mismatch was
+            // observed under ChainMeta:`state_root:boundary`. Subsequent
+            // restarts at or before that block log at INFO instead of WARN.
             let computed = self.state.compute_state_root();
             if computed != head.state_root {
-                tracing::warn!(
-                    head_number = head.number,
-                    expected = ?head.state_root,
-                    computed = ?computed,
-                    "state_root mismatch after resume — storage may be corrupted or schema changed"
-                );
+                let boundary = storage
+                    .get(Column::ChainMeta, b"state_root:boundary")
+                    .ok()
+                    .flatten()
+                    .and_then(|b| {
+                        if b.len() == 8 {
+                            let mut a = [0u8; 8];
+                            a.copy_from_slice(&b);
+                            Some(u64::from_le_bytes(a))
+                        } else {
+                            None
+                        }
+                    });
+                match boundary {
+                    Some(bn) if bn == head.number => {
+                        tracing::info!(
+                            head_number = head.number,
+                            "state_root mismatch at recorded schema boundary (expected)"
+                        );
+                    }
+                    _ => {
+                        tracing::warn!(
+                            head_number = head.number,
+                            expected = ?head.state_root,
+                            computed = ?computed,
+                            "state_root mismatch after resume — storage may be corrupted or schema changed"
+                        );
+                        let _ = storage.put(
+                            Column::ChainMeta,
+                            b"state_root:boundary",
+                            &head.number.to_le_bytes(),
+                        );
+                    }
+                }
             }
 
             info!(

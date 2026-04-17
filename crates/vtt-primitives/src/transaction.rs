@@ -261,6 +261,9 @@ pub enum TransactionAction {
         quorum: u8,
         /// Maximum staleness in milliseconds before a read is considered invalid.
         max_staleness_ms: u64,
+        /// Number of decimal places the raw value is scaled by. A price of
+        /// 50_000.00 USD on a feed with `decimals=2` arrives as `5_000_000`.
+        decimals: u8,
     },
 
     /// Submit a new value to an existing oracle feed. Sender must be one of

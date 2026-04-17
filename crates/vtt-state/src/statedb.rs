@@ -81,6 +81,11 @@ pub struct StateDB {
     /// elect_validators can iterate validators on a fresh StateDB whose
     /// `accounts` HashMap has not yet been warmed from disk.
     stakers: HashSet<Address>,
+    /// Number of unique holders with non-zero (available + locked) balance
+    /// per asset. Maintained incrementally by `put_ownership` so the
+    /// `max_holders_per_asset` governance cap can be enforced in O(1)
+    /// instead of re-scanning every ownership record on each transfer.
+    asset_holder_count: HashMap<H256, u32>,
     /// Protocol treasury address (set from consensus params at genesis/init).
     treasury_address: Address,
     /// Epoch length in blocks (set from consensus params at genesis/init).
@@ -119,6 +124,7 @@ impl StateDB {
             block_commitments: HashMap::new(),
             missed_slots: HashMap::new(),
             stakers: HashSet::new(),
+            asset_holder_count: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -150,6 +156,7 @@ impl StateDB {
             block_commitments: HashMap::new(),
             missed_slots: HashMap::new(),
             stakers: HashSet::new(),
+            asset_holder_count: HashMap::new(),
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
@@ -439,17 +446,54 @@ impl StateDB {
     }
 
     /// Set ownership record.
+    ///
+    /// Maintains the `asset_holder_count` index incrementally:
+    /// - previous total was zero and new total is non-zero → +1 holder
+    /// - previous total was non-zero and new total is zero → -1 holder
+    /// - otherwise no change to the counter
     pub fn put_ownership(&mut self, record: OwnershipRecord) {
         let key = (record.asset_id, record.owner);
         self.dirty_assets.push(record.asset_id);
+
+        let prev_total = self
+            .ownership
+            .get(&key)
+            .map(|r| r.total())
+            .unwrap_or(Amount::ZERO);
+        let new_total = record.total();
+        let asset_id = record.asset_id;
+
         if let Some(ref storage) = self.storage {
-            let mut storage_key = record.asset_id.as_bytes().to_vec();
+            let mut storage_key = asset_id.as_bytes().to_vec();
             storage_key.extend_from_slice(record.owner.as_bytes());
             if let Ok(bytes) = borsh::to_vec(&record) {
                 let _ = storage.put(Column::Ownership, &storage_key, &bytes);
             }
         }
         self.ownership.insert(key, record);
+
+        let was_holder = !prev_total.is_zero();
+        let is_holder = !new_total.is_zero();
+        if was_holder != is_holder {
+            let entry = self.asset_holder_count.entry(asset_id).or_insert(0);
+            if is_holder {
+                *entry = entry.saturating_add(1);
+            } else {
+                *entry = entry.saturating_sub(1);
+            }
+            let updated = *entry;
+            if let Some(ref storage) = self.storage {
+                let mut key = b"holders:".to_vec();
+                key.extend_from_slice(asset_id.as_bytes());
+                let _ = storage.put(Column::ChainMeta, &key, &updated.to_le_bytes());
+            }
+        }
+    }
+
+    /// Current number of unique holders with non-zero balance for an asset.
+    /// Falls back to 0 when the asset has never had any holders.
+    pub fn asset_holder_count(&self, asset_id: &H256) -> u32 {
+        self.asset_holder_count.get(asset_id).copied().unwrap_or(0)
     }
 
     /// Transfer asset tokens between owners. Returns error if insufficient balance.
@@ -1351,6 +1395,19 @@ impl StateDB {
                 self.stakers = items.into_iter().collect();
             }
         }
+        // Re-hydrate the per-asset holder count index.
+        if let Ok(entries) = storage.prefix_scan(Column::ChainMeta, b"holders:") {
+            for (key, value) in entries {
+                if key.len() == b"holders:".len() + 32 && value.len() == 4 {
+                    let mut id = [0u8; 32];
+                    id.copy_from_slice(&key[b"holders:".len()..]);
+                    let mut v = [0u8; 4];
+                    v.copy_from_slice(&value);
+                    self.asset_holder_count
+                        .insert(H256::from(id), u32::from_le_bytes(v));
+                }
+            }
+        }
         // Warm the account cache for every staker so elect_validators (which
         // iterates the in-memory map) sees their staking state after resume.
         let addrs: Vec<Address> = self.stakers.iter().copied().collect();
@@ -1559,7 +1616,10 @@ impl StateDB {
                 let _ = storage.put(Column::Assets, id.as_bytes(), &bytes);
             }
         }
-        // Ownership — key = asset_id || owner
+        // Ownership — key = asset_id || owner. Also seed the per-asset
+        // holder counter from the current cache so the in-memory counter
+        // (zero on fresh StateDB) matches reality before any transfer runs.
+        self.asset_holder_count.clear();
         for ((asset_id, owner), rec) in &self.ownership {
             if let Ok(bytes) = borsh::to_vec(rec) {
                 let mut key = Vec::with_capacity(32 + 20);
@@ -1567,6 +1627,14 @@ impl StateDB {
                 key.extend_from_slice(owner.as_bytes());
                 let _ = storage.put(Column::Ownership, &key, &bytes);
             }
+            if !rec.total().is_zero() {
+                *self.asset_holder_count.entry(*asset_id).or_insert(0) += 1;
+            }
+        }
+        for (id, count) in &self.asset_holder_count {
+            let mut k = b"holders:".to_vec();
+            k.extend_from_slice(id.as_bytes());
+            let _ = storage.put(Column::ChainMeta, &k, &count.to_le_bytes());
         }
         // Oracles
         for (feed_id, feed) in &self.oracles {
@@ -1900,6 +1968,7 @@ impl StateDB {
             epoch_length: self.epoch_length,
             dex_paused: self.dex_paused,
             dirty_pools: self.dirty_pools.clone(),
+            asset_holder_count: self.asset_holder_count.clone(),
         }
     }
 
@@ -1945,6 +2014,7 @@ impl StateDB {
         self.epoch_length = snapshot.epoch_length;
         self.dex_paused = snapshot.dex_paused;
         self.dirty_pools = snapshot.dirty_pools;
+        self.asset_holder_count = snapshot.asset_holder_count;
 
         // Re-persist the restored cache so storage matches in-memory state.
         // Without this, a mid-tx write that was rolled back would still be
@@ -1997,6 +2067,11 @@ impl StateDB {
                 let key = [b"gov:", id.as_bytes().as_slice()].concat();
                 let _ = storage.put(Column::ChainMeta, &key, data);
             }
+            for (id, count) in &self.asset_holder_count {
+                let mut key = b"holders:".to_vec();
+                key.extend_from_slice(id.as_bytes());
+                let _ = storage.put(Column::ChainMeta, &key, &count.to_le_bytes());
+            }
         }
     }
 }
@@ -2041,6 +2116,7 @@ pub struct StateSnapshot {
     epoch_length: u64,
     dex_paused: bool,
     dirty_pools: Vec<H256>,
+    asset_holder_count: HashMap<H256, u32>,
 }
 
 #[cfg(test)]

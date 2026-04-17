@@ -530,6 +530,7 @@ impl VttApiServer for VttRpcImpl {
             updated_at: f.updated_at,
             quorum: f.quorum,
             sources: f.authorized_sources.len(),
+            decimals: f.decimals,
         }))
     }
 
@@ -545,6 +546,7 @@ impl VttApiServer for VttRpcImpl {
                 updated_at: f.updated_at,
                 quorum: f.quorum,
                 sources: f.authorized_sources.len(),
+                decimals: f.decimals,
             })
             .collect())
     }

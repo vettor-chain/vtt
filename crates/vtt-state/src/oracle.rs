@@ -40,8 +40,13 @@ pub struct OracleFeed {
     pub quorum: u8,
     /// Maximum staleness in milliseconds before feed is invalid.
     pub max_staleness_ms: u64,
-    /// Latest aggregated value.
+    /// Latest aggregated value (raw u128 carried by `Amount`).
     pub latest_value: Option<Amount>,
+    /// Number of decimal places the raw `latest_value` should be scaled by
+    /// for human display. Oracle sources submit values already scaled by
+    /// `10^decimals`; consumers divide by `10^decimals` to recover the real
+    /// number. Defaults to `18` for feeds created before this field existed.
+    pub decimals: u8,
     /// Timestamp of the latest aggregated value.
     pub updated_at: Timestamp,
     /// Recent submissions for quorum aggregation.
@@ -51,7 +56,7 @@ pub struct OracleFeed {
 }
 
 impl OracleFeed {
-    /// Create a new oracle feed.
+    /// Create a new oracle feed with the default 18-decimal scaling.
     pub fn new(
         feed_id: H256,
         name: String,
@@ -59,6 +64,28 @@ impl OracleFeed {
         authorized_sources: Vec<Address>,
         quorum: u8,
         max_staleness_ms: u64,
+    ) -> Self {
+        Self::new_with_decimals(
+            feed_id,
+            name,
+            feed_type,
+            authorized_sources,
+            quorum,
+            max_staleness_ms,
+            18,
+        )
+    }
+
+    /// Create a new oracle feed with an explicit decimals scale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_decimals(
+        feed_id: H256,
+        name: String,
+        feed_type: OracleFeedType,
+        authorized_sources: Vec<Address>,
+        quorum: u8,
+        max_staleness_ms: u64,
+        decimals: u8,
     ) -> Self {
         Self {
             feed_id,
@@ -68,6 +95,7 @@ impl OracleFeed {
             quorum: quorum.max(1),
             max_staleness_ms,
             latest_value: None,
+            decimals,
             updated_at: 0,
             pending_submissions: Vec::new(),
             created_at: 0,

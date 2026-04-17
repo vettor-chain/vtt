@@ -674,6 +674,7 @@ fn execute_action(
             authorized_sources,
             quorum,
             max_staleness_ms,
+            decimals,
         } => execute_create_oracle_feed(
             state,
             sender,
@@ -683,6 +684,7 @@ fn execute_action(
             authorized_sources,
             *quorum,
             *max_staleness_ms,
+            *decimals,
             block_number,
         ),
 
@@ -845,8 +847,14 @@ fn execute_create_oracle_feed(
     authorized_sources: &[Address],
     quorum: u8,
     max_staleness_ms: u64,
+    decimals: u8,
     block_number: u64,
 ) -> Result<Vec<Log>, ExecutionError> {
+    if decimals > 30 {
+        return Err(ExecutionError::Custom(
+            "oracle decimals must be <= 30".into(),
+        ));
+    }
     let treasury = state.get_treasury_address();
     if *sender != treasury {
         return Err(ExecutionError::Custom(
@@ -913,13 +921,14 @@ fn execute_create_oracle_feed(
         s => vtt_state::oracle::OracleFeedType::Custom(s.to_string()),
     };
 
-    let mut feed = vtt_state::oracle::OracleFeed::new(
+    let mut feed = vtt_state::oracle::OracleFeed::new_with_decimals(
         feed_id,
         name.to_string(),
         parsed_type,
         authorized_sources.to_vec(),
         quorum,
         max_staleness_ms,
+        decimals,
     );
     feed.created_at = block_number;
     state.register_oracle(feed).map_err(|e| match e {
@@ -2704,10 +2713,7 @@ fn check_max_holders(
     if !recipient_holding.total().is_zero() {
         return Ok(());
     }
-    let current_holders = state
-        .iter_ownership_for_asset(asset_id)
-        .filter(|o| !o.total().is_zero())
-        .count() as u32;
+    let current_holders = state.asset_holder_count(asset_id);
     if current_holders >= max {
         return Err(ExecutionError::Custom(format!(
             "asset has reached max_holders_per_asset ({max}); recipient is a new holder",
@@ -3462,6 +3468,7 @@ mod tests {
             &sources,
             2,
             60_000,
+            8,
             0,
         )
         .expect_err("non-treasury must fail");
@@ -3479,10 +3486,12 @@ mod tests {
             &sources,
             2,
             60_000,
+            8,
             7,
         )
         .unwrap();
-        assert!(state.get_oracle(&feed_id).is_some());
+        let feed = state.get_oracle(&feed_id).unwrap();
+        assert_eq!(feed.decimals, 8);
     }
 
     #[test]
@@ -3506,6 +3515,7 @@ mod tests {
             &sources,
             2,
             60_000,
+            18,
             0,
         )
         .unwrap();
@@ -3535,7 +3545,7 @@ mod tests {
         let feed_id = H256::from([0xDE; 32]);
         let sources = vec![Address::from([0xA0; 20])];
         execute_create_oracle_feed(
-            &mut state, &treasury, feed_id, "Custom", "custom", &sources, 1, 0, 0,
+            &mut state, &treasury, feed_id, "Custom", "custom", &sources, 1, 0, 0, 0,
         )
         .unwrap();
 
