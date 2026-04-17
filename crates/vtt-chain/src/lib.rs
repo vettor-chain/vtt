@@ -492,13 +492,19 @@ impl Chain {
             });
         }
 
-        // 8. Store block
+        // 8. Store block + receipts. Receipts are keyed by tx_hash so the
+        // RPC layer can fetch them for get_transaction / event log queries.
         if let Some(ref storage) = self.storage {
             if let Ok(header_bytes) = borsh::to_vec(&block.header) {
                 let _ = storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes);
             }
             if let Ok(block_bytes) = borsh::to_vec(&block) {
                 let _ = storage.put(Column::BlockBodies, block_hash.as_bytes(), &block_bytes);
+            }
+            for receipt in &receipts {
+                if let Ok(bytes) = borsh::to_vec(receipt) {
+                    let _ = storage.put(Column::Receipts, receipt.tx_hash.as_bytes(), &bytes);
+                }
             }
         }
         self.headers.insert(block_hash, block.header.clone());
@@ -648,6 +654,18 @@ impl Chain {
     /// Get the balance of an address from the current state.
     pub fn get_balance_of(&self, address: &Address) -> Amount {
         self.state.get_balance(address)
+    }
+
+    /// Load a persisted transaction receipt by hash, if present.
+    /// Returns None if the receipt is not stored (tx never executed, or
+    /// produced before receipt persistence was introduced).
+    pub fn get_receipt(&self, tx_hash: &H256) -> Option<TransactionReceipt> {
+        let storage = self.storage.as_ref()?;
+        let bytes = storage
+            .get(Column::Receipts, tx_hash.as_bytes())
+            .ok()
+            .flatten()?;
+        borsh::from_slice(&bytes).ok()
     }
 }
 

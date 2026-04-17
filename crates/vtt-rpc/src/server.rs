@@ -22,9 +22,9 @@ use vtt_txpool::TxPool;
 
 use crate::types::{
     AccountInfo, AssetBalanceInfo, AssetInfo, AssetProposalInfo, BlockInfo, BridgeWithdrawalInfo,
-    ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, NodeMetricsInfo, OracleFeedInfo,
-    PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, SlashRecordInfo, StakingInfo,
-    SwapQuoteRpc, TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
+    ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, LogInfo, NodeMetricsInfo,
+    OracleFeedInfo, PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, ReceiptInfo,
+    SlashRecordInfo, StakingInfo, SwapQuoteRpc, TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -201,6 +201,15 @@ pub trait VttApi {
         address: Address,
         asset_ids: Vec<H256>,
     ) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
+
+    /// Get the receipt (logs, gas_used, success) for a transaction by hash.
+    /// Returns None when the tx never executed or was produced before receipt
+    /// persistence was introduced.
+    #[method(name = "vtt_getTransactionReceipt")]
+    async fn get_transaction_receipt(
+        &self,
+        tx_hash: H256,
+    ) -> Result<Option<ReceiptInfo>, ErrorObjectOwned>;
 
     /// Check whether an address is KYC-approved for regulated asset transfers.
     #[method(name = "vtt_isKycApproved")]
@@ -938,6 +947,28 @@ impl VttApiServer for VttRpcImpl {
             });
         }
         Ok(balances)
+    }
+
+    async fn get_transaction_receipt(
+        &self,
+        tx_hash: H256,
+    ) -> Result<Option<ReceiptInfo>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain.get_receipt(&tx_hash).map(|r| ReceiptInfo {
+            tx_hash: r.tx_hash,
+            success: r.success,
+            gas_used: r.gas_used,
+            log_count: r.logs.len(),
+            logs: r
+                .logs
+                .into_iter()
+                .map(|l| LogInfo {
+                    address: l.address,
+                    topics: l.topics,
+                    data: format!("0x{}", hex::encode(&l.data)),
+                })
+                .collect(),
+        }))
     }
 
     async fn is_kyc_approved(&self, address: Address) -> Result<bool, ErrorObjectOwned> {

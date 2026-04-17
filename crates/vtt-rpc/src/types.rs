@@ -100,6 +100,16 @@ pub struct ReceiptInfo {
     pub success: bool,
     pub gas_used: u64,
     pub log_count: usize,
+    #[serde(default)]
+    pub logs: Vec<LogInfo>,
+}
+
+/// RPC-facing representation of an emitted log.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LogInfo {
+    pub address: Address,
+    pub topics: Vec<H256>,
+    pub data: String,
 }
 
 impl From<&TransactionReceipt> for ReceiptInfo {
@@ -109,6 +119,15 @@ impl From<&TransactionReceipt> for ReceiptInfo {
             success: r.success,
             gas_used: r.gas_used,
             log_count: r.logs.len(),
+            logs: r
+                .logs
+                .iter()
+                .map(|l| LogInfo {
+                    address: l.address,
+                    topics: l.topics.clone(),
+                    data: format!("0x{}", hex::encode(&l.data)),
+                })
+                .collect(),
         }
     }
 }
