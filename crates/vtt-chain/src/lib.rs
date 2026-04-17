@@ -181,6 +181,56 @@ impl Chain {
             return Ok(());
         }
 
+        // One-time backfill of the tx_hash -> (block_number, tx_index) index
+        // for blocks imported before the index existed. Tracks the highest
+        // indexed block under ChainMeta:tx_index:head so subsequent restarts
+        // skip the scan.
+        let indexed_upto = storage
+            .get(Column::ChainMeta, b"tx_index:head")
+            .ok()
+            .flatten()
+            .and_then(|b| {
+                if b.len() == 8 {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(&b);
+                    Some(u64::from_le_bytes(a))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let head_number = self.headers.get(&head_hash).map(|h| h.number).unwrap_or(0);
+        if head_number > indexed_upto {
+            let mut indexed = 0u64;
+            for n in (indexed_upto + 1)..=head_number {
+                if let Some(hash) = self.canonical.get(&n).copied() {
+                    if let Some(body) = self.bodies.get(&hash).cloned() {
+                        for (idx, tx) in body.transactions.iter().enumerate() {
+                            let tx_hash = vtt_crypto::blake3_hash(&tx.payload_bytes());
+                            let mut v = Vec::with_capacity(12);
+                            v.extend_from_slice(&n.to_le_bytes());
+                            v.extend_from_slice(&(idx as u32).to_le_bytes());
+                            let _ = storage.put(Column::Transactions, tx_hash.as_bytes(), &v);
+                            indexed += 1;
+                        }
+                    }
+                }
+            }
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"tx_index:head",
+                &head_number.to_le_bytes(),
+            );
+            if indexed > 0 {
+                tracing::info!(
+                    backfilled_from = indexed_upto + 1,
+                    backfilled_to = head_number,
+                    tx_count = indexed,
+                    "backfilled tx_hash -> (block, idx) index"
+                );
+            }
+        }
+
         self.head_hash = Some(head_hash);
         if let Some(head) = self.headers.get(&head_hash).cloned() {
             let epoch = self.consensus.epoch_for_block(head.number);
@@ -563,6 +613,13 @@ impl Chain {
                 v.extend_from_slice(&(idx as u32).to_le_bytes());
                 let _ = storage.put(Column::Transactions, tx_hash.as_bytes(), &v);
             }
+            // Bump the resume-backfill sentinel so the next restart skips the
+            // O(chain_length) rescan for already-indexed blocks.
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"tx_index:head",
+                &block.header.number.to_le_bytes(),
+            );
         }
         self.headers.insert(block_hash, block.header.clone());
         self.bodies.insert(block_hash, block.clone());

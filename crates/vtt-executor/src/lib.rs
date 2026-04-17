@@ -390,7 +390,7 @@ fn execute_action(
             }
             check_jurisdiction_policy(state, sender)?;
             check_jurisdiction_policy(state, to)?;
-            check_max_holders(state, asset_id, to)?;
+            check_max_holders(state, asset_id, sender, to, *amount)?;
             state.transfer_asset(asset_id, sender, to, *amount)?;
             Ok(vec![Log {
                 address: *sender,
@@ -2703,7 +2703,9 @@ fn check_jurisdiction_policy(state: &StateDB, addr: &Address) -> Result<(), Exec
 fn check_max_holders(
     state: &StateDB,
     asset_id: &H256,
+    sender: &Address,
     recipient: &Address,
+    amount: Amount,
 ) -> Result<(), ExecutionError> {
     let max = state.get_max_holders_per_asset();
     if max == 0 {
@@ -2711,6 +2713,15 @@ fn check_max_holders(
     }
     let recipient_holding = state.get_ownership(asset_id, recipient);
     if !recipient_holding.total().is_zero() {
+        // Recipient is already a holder — transfer can only change balances,
+        // never the holder set.
+        return Ok(());
+    }
+    // Recipient is a new holder. Allow when the sender is moving their full
+    // balance across (sender -> 0 offsets recipient -> non-zero → net = 0).
+    let sender_holding = state.get_ownership(asset_id, sender);
+    let sender_total_after = sender_holding.total().raw().saturating_sub(amount.raw());
+    if sender_total_after == 0 && !sender_holding.total().is_zero() {
         return Ok(());
     }
     let current_holders = state.asset_holder_count(asset_id);

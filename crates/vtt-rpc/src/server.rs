@@ -2,15 +2,113 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use jsonrpsee::core::async_trait;
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
+use tower::{Layer, Service};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{debug, info};
+
+tokio::task_local! {
+    /// Client IP of the currently-executing RPC request, populated by
+    /// `ClientIpLayer` from `X-Forwarded-For` / `Forwarded` / the peer
+    /// socket address before the jsonrpsee handler runs. Handlers read
+    /// this via `current_client_ip()` to rate-limit per-IP instead of
+    /// sharing one bucket across all clients.
+    static CLIENT_IP: IpAddr;
+}
+
+fn current_client_ip() -> IpAddr {
+    CLIENT_IP
+        .try_with(|ip| *ip)
+        .unwrap_or_else(|_| "127.0.0.1".parse().unwrap())
+}
+
+/// Tower layer that extracts the real client IP from `X-Forwarded-For`
+/// (first hop) or `Forwarded: for=...` and scopes the downstream future
+/// inside `CLIENT_IP.scope(...)`. Falls back to `127.0.0.1` when neither
+/// header is present — which is the right behaviour for loopback traffic
+/// (developer tools hitting the node directly).
+#[derive(Clone)]
+struct ClientIpLayer;
+
+impl<S> Layer<S> for ClientIpLayer {
+    type Service = ClientIpService<S>;
+    fn layer(&self, inner: S) -> Self::Service {
+        ClientIpService { inner }
+    }
+}
+
+#[derive(Clone)]
+struct ClientIpService<S> {
+    inner: S,
+}
+
+fn extract_client_ip<B>(req: &hyper::Request<B>) -> IpAddr {
+    // X-Forwarded-For: "client, proxy1, proxy2" — first value is the real client.
+    if let Some(v) = req.headers().get("x-forwarded-for") {
+        if let Ok(s) = v.to_str() {
+            if let Some(first) = s.split(',').next() {
+                if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                    return ip;
+                }
+            }
+        }
+    }
+    // Forwarded: for=1.2.3.4;proto=https;by=...  — RFC 7239.
+    if let Some(v) = req.headers().get("forwarded") {
+        if let Ok(s) = v.to_str() {
+            for part in s.split(';') {
+                let part = part.trim();
+                if let Some(rest) = part.strip_prefix("for=") {
+                    let trimmed = rest.trim_matches(|c: char| c == '"' || c.is_whitespace());
+                    // IPv6 addrs are bracketed inside square brackets: for="[::1]:12345"
+                    let bare = trimmed.trim_start_matches('[').trim_end_matches(']');
+                    let no_port = bare.rsplit_once(':').map(|(h, _)| h).unwrap_or(bare);
+                    if let Ok(ip) = no_port.parse::<IpAddr>() {
+                        return ip;
+                    }
+                }
+            }
+        }
+    }
+    "127.0.0.1".parse().unwrap()
+}
+
+impl<S, B> Service<hyper::Request<B>> for ClientIpService<S>
+where
+    S: Service<hyper::Request<B>> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: hyper::Request<B>) -> Self::Future {
+        let ip = extract_client_ip(&req);
+        // Clone so we don't move the in-progress service reference; see the
+        // tower docs on Clone-before-call for the canonical pattern.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        Box::pin(async move {
+            CLIENT_IP
+                .scope(ip, async move { inner.call(req).await })
+                .await
+        })
+    }
+}
 
 use borsh::BorshDeserialize;
 use vtt_chain::Chain;
@@ -324,8 +422,7 @@ const MAX_BLOCK_SCAN_DEPTH: u64 = 20_000;
 /// Gate expensive read RPCs behind a dedicated per-IP token bucket. Cheap
 /// reads (getBalance, chainStatus, getBlockByNumber) skip this check.
 fn check_heavy_read(state: &RpcState) -> Result<(), ErrorObjectOwned> {
-    let client_ip: IpAddr = "127.0.0.1".parse().unwrap();
-    if !state.heavy_read_limiter.check(client_ip) {
+    if !state.heavy_read_limiter.check(current_client_ip()) {
         return Err(ErrorObjectOwned::owned(
             -32005,
             "Rate limit exceeded",
@@ -552,12 +649,9 @@ impl VttApiServer for VttRpcImpl {
     }
 
     async fn send_transaction(&self, tx_hex: String) -> Result<H256, ErrorObjectOwned> {
-        // Per-IP rate limit check.
-        // TODO: Extract real client IP from X-Forwarded-For when behind a reverse proxy.
-        // For now, falls back to localhost, which means all requests share a single bucket
-        // unless the deployment injects the real IP upstream.
-        let client_ip: IpAddr = "127.0.0.1".parse().unwrap();
-        if !self.state.send_tx_limiter.check(client_ip) {
+        // Per-IP rate limit check. `current_client_ip()` reads the task-local
+        // populated by `ClientIpLayer` from X-Forwarded-For / Forwarded.
+        if !self.state.send_tx_limiter.check(current_client_ip()) {
             return Err(ErrorObjectOwned::owned(
                 -32005,
                 "Rate limit exceeded",
@@ -1604,7 +1698,12 @@ impl RpcServer {
 
         // Order: body_limit is innermost (applied first to the service),
         // CORS is outermost (applied last, intercepts preflight OPTIONS before body limit).
-        let middleware = tower::ServiceBuilder::new().layer(body_limit).layer(cors);
+        // ClientIpLayer sits between them so the scoped task-local is set on
+        // every request before jsonrpsee's handler runs.
+        let middleware = tower::ServiceBuilder::new()
+            .layer(body_limit)
+            .layer(ClientIpLayer)
+            .layer(cors);
 
         let server = Server::builder()
             .set_http_middleware(middleware)
