@@ -294,6 +294,26 @@ fn read_chain(
     })
 }
 
+/// Log the full details of an internal error and return a redacted
+/// JSON-RPC error to the caller. Keeps infrastructure internals out of
+/// responses while preserving operability via server logs.
+fn internal_err<E: std::fmt::Display>(ctx: &str, err: E) -> ErrorObjectOwned {
+    tracing::warn!(context = ctx, error = %err, "RPC internal error");
+    ErrorObjectOwned::owned(-32603, format!("{ctx}: internal error"), None::<()>)
+}
+
+/// Maximum hex length accepted by sendTransaction. Anything larger is rejected
+/// before allocating the decoded buffer. 256 KiB of hex decodes to 128 KiB of
+/// bytes, which is far larger than any well-formed signed transaction.
+const MAX_TX_HEX_LEN: usize = 256 * 1024;
+
+/// Upper bound on the number of recent blocks scanned by RPC methods that
+/// need to walk the chain (e.g. get_transaction, get_bridge_withdrawals).
+/// Callers are expected to use paginated, index-backed queries once the
+/// chain grows; until then this cap prevents a single request from pinning
+/// the read lock on a long scan.
+const MAX_BLOCK_SCAN_DEPTH: u64 = 20_000;
+
 /// Helper: acquire a write lock on the chain, returning a JSON-RPC internal error on lock poisoning.
 #[allow(dead_code)]
 fn write_chain(
@@ -504,10 +524,18 @@ impl VttApiServer for VttRpcImpl {
             ));
         }
 
+        // Reject oversized inputs before allocating the decoded buffer.
+        if tx_hex.len() > MAX_TX_HEX_LEN {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "tx_hex too large",
+                None::<()>,
+            ));
+        }
+
         // Decode the hex-encoded signed transaction
-        let tx_bytes = hex::decode(&tx_hex).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("invalid hex: {e}"), None::<()>)
-        })?;
+        let tx_bytes = hex::decode(&tx_hex)
+            .map_err(|_| ErrorObjectOwned::owned(-32602, "invalid hex encoding", None::<()>))?;
         let tx: vtt_primitives::transaction::SignedTransaction = borsh::from_slice(&tx_bytes)
             .map_err(|e| {
                 debug!("transaction deserialization failed: {e}");
@@ -558,9 +586,8 @@ impl VttApiServer for VttRpcImpl {
         let chain = read_chain(&self.state.chain)?;
         let mut pools = Vec::new();
         for (_id, data) in chain.state().iter_pools() {
-            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
-                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
-            })?;
+            let pool = vtt_dex::PoolState::try_from_slice(data)
+                .map_err(|e| internal_err("pool deserialize", e))?;
             pools.push(pool_state_to_info(&pool));
         }
         Ok(pools)
@@ -571,13 +598,8 @@ impl VttApiServer for VttRpcImpl {
         match chain.state().get_pool_raw(&pool_id) {
             None => Ok(None),
             Some(data) => {
-                let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32603,
-                        format!("pool deserialize error: {e}"),
-                        None::<()>,
-                    )
-                })?;
+                let pool = vtt_dex::PoolState::try_from_slice(data)
+                    .map_err(|e| internal_err("pool deserialize", e))?;
                 Ok(Some(pool_state_to_info(&pool)))
             }
         }
@@ -590,9 +612,8 @@ impl VttApiServer for VttRpcImpl {
         let chain = read_chain(&self.state.chain)?;
         // Iterate all pools, find one where this token is paired with native VTT (H256::ZERO)
         for (_id, data) in chain.state().iter_pools() {
-            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
-                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
-            })?;
+            let pool = vtt_dex::PoolState::try_from_slice(data)
+                .map_err(|e| internal_err("pool deserialize", e))?;
 
             let ra = pool.reserve_a.raw();
             let rb = pool.reserve_b.raw();
@@ -623,9 +644,8 @@ impl VttApiServer for VttRpcImpl {
         let chain = read_chain(&self.state.chain)?;
         let mut prices = Vec::new();
         for (_id, data) in chain.state().iter_pools() {
-            let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
-                ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
-            })?;
+            let pool = vtt_dex::PoolState::try_from_slice(data)
+                .map_err(|e| internal_err("pool deserialize", e))?;
 
             let ra = pool.reserve_a.raw();
             let rb = pool.reserve_b.raw();
@@ -674,9 +694,8 @@ impl VttApiServer for VttRpcImpl {
             .state()
             .get_pool_raw(&pool_id)
             .ok_or_else(|| ErrorObjectOwned::owned(-32602, "pool not found", None::<()>))?;
-        let pool = vtt_dex::PoolState::try_from_slice(data).map_err(|e| {
-            ErrorObjectOwned::owned(-32603, format!("pool deserialize error: {e}"), None::<()>)
-        })?;
+        let pool = vtt_dex::PoolState::try_from_slice(data)
+            .map_err(|e| internal_err("pool deserialize", e))?;
 
         let (reserve_in, reserve_out) = if a_to_b {
             (pool.reserve_a.raw(), pool.reserve_b.raw())
@@ -686,21 +705,13 @@ impl VttApiServer for VttRpcImpl {
 
         let (amount_in_net, _lp_fee, _protocol_fee) =
             vtt_dex::math::calculate_fees(amount_in_u128, pool.fee_bps, pool.protocol_fee_bps)
-                .map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32603,
-                        format!("fee calculation error: {e}"),
-                        None::<()>,
-                    )
-                })?;
+                .map_err(|e| internal_err("fee calculation", e))?;
 
         // total_fee = lp_fee + protocol_fee, already captured as amount_in - amount_in_net
         let total_fee = amount_in_u128.saturating_sub(amount_in_net);
 
         let amount_out = vtt_dex::math::get_amount_out(amount_in_net, reserve_in, reserve_out)
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32603, format!("swap quote error: {e}"), None::<()>)
-            })?;
+            .map_err(|e| internal_err("swap quote", e))?;
 
         // Price impact in bps: (amount_in_net / reserve_in) * 10000
         let price_impact_bps = if reserve_in > 0 {
@@ -743,7 +754,8 @@ impl VttApiServer for VttRpcImpl {
     ) -> Result<Option<TransactionInfo>, ErrorObjectOwned> {
         let chain = read_chain(&self.state.chain)?;
         let height = chain.height().unwrap_or(0);
-        for n in (0..=height).rev() {
+        let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
+        for n in (min..=height).rev() {
             if let Some(block) = chain.get_block_by_number(n) {
                 for tx in &block.transactions {
                     let tx_hash = blake3_hash(&tx.payload_bytes());
@@ -808,9 +820,10 @@ impl VttApiServer for VttRpcImpl {
 
         let chain = read_chain(&self.state.chain)?;
         let height = chain.height().unwrap_or(0);
+        let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
         let mut withdrawals = Vec::new();
 
-        for n in (0..=height).rev() {
+        for n in (min..=height).rev() {
             if let Some(block) = chain.get_block_by_number(n) {
                 let ts = block.header.timestamp;
                 let bn = block.header.number;
@@ -1364,8 +1377,9 @@ fn tx_to_info(
 /// backed by the storage layer to support efficient pagination without full scans.
 fn collect_all_txs(chain: &Chain) -> Vec<TransactionInfo> {
     let height = chain.height().unwrap_or(0);
+    let min = height.saturating_sub(MAX_BLOCK_SCAN_DEPTH);
     let mut txs = Vec::new();
-    for n in (0..=height).rev() {
+    for n in (min..=height).rev() {
         if let Some(block) = chain.get_block_by_number(n) {
             let ts = block.header.timestamp;
             let bn = block.header.number;
