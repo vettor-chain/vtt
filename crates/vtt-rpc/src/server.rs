@@ -23,8 +23,8 @@ use vtt_txpool::TxPool;
 use crate::types::{
     AccountInfo, AssetBalanceInfo, AssetInfo, AssetProposalInfo, BlockInfo, BridgeWithdrawalInfo,
     ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, NodeMetricsInfo, OracleFeedInfo,
-    PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, StakingInfo, SwapQuoteRpc,
-    TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
+    PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, SlashRecordInfo, StakingInfo,
+    SwapQuoteRpc, TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -201,6 +201,21 @@ pub trait VttApi {
         address: Address,
         asset_ids: Vec<H256>,
     ) -> Result<Vec<AssetBalanceInfo>, ErrorObjectOwned>;
+
+    /// Check whether an address is KYC-approved for regulated asset transfers.
+    #[method(name = "vtt_isKycApproved")]
+    async fn is_kyc_approved(&self, address: Address) -> Result<bool, ErrorObjectOwned>;
+
+    /// Get the currently configured bridge relayer address (or zero if unset).
+    #[method(name = "vtt_getBridgeRelayer")]
+    async fn get_bridge_relayer(&self) -> Result<Address, ErrorObjectOwned>;
+
+    /// Get slashing history for a validator address.
+    #[method(name = "vtt_getSlashingHistory")]
+    async fn get_slashing_history(
+        &self,
+        validator: Address,
+    ) -> Result<Vec<SlashRecordInfo>, ErrorObjectOwned>;
 }
 
 /// Per-IP rate limiter for sendTransaction -- sliding window counter.
@@ -427,17 +442,7 @@ impl VttApiServer for VttRpcImpl {
 
     async fn get_asset(&self, asset_id: H256) -> Result<Option<AssetInfo>, ErrorObjectOwned> {
         let chain = read_chain(&self.state.chain)?;
-        Ok(chain.state().get_asset(&asset_id).map(|a| AssetInfo {
-            id: a.id,
-            name: a.name.clone(),
-            symbol: a.symbol.clone(),
-            issuer: a.issuer,
-            total_supply: a.total_supply,
-            status: a.status_str().to_string(),
-            decimals: a.decimals,
-            jurisdiction: a.jurisdiction.clone(),
-            legal_entity: a.legal_entity.clone(),
-        }))
+        Ok(chain.state().get_asset(&asset_id).map(asset_to_info))
     }
 
     async fn get_asset_balance(
@@ -460,17 +465,7 @@ impl VttApiServer for VttRpcImpl {
         Ok(chain
             .state()
             .iter_assets()
-            .map(|(_, a)| AssetInfo {
-                id: a.id,
-                name: a.name.clone(),
-                symbol: a.symbol.clone(),
-                issuer: a.issuer,
-                total_supply: a.total_supply,
-                status: a.status_str().to_string(),
-                decimals: a.decimals,
-                jurisdiction: a.jurisdiction.clone(),
-                legal_entity: a.legal_entity.clone(),
-            })
+            .map(|(_, a)| asset_to_info(a))
             .collect())
     }
 
@@ -943,6 +938,72 @@ impl VttApiServer for VttRpcImpl {
             });
         }
         Ok(balances)
+    }
+
+    async fn is_kyc_approved(&self, address: Address) -> Result<bool, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain.state().is_kyc_approved(&address))
+    }
+
+    async fn get_bridge_relayer(&self) -> Result<Address, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain.state().bridge_relayer())
+    }
+
+    async fn get_slashing_history(
+        &self,
+        validator: Address,
+    ) -> Result<Vec<SlashRecordInfo>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain
+            .state()
+            .slashing_history(&validator)
+            .into_iter()
+            .map(|r| SlashRecordInfo {
+                validator: r.validator,
+                epoch: r.epoch,
+                reason: r.reason,
+                amount: r.amount,
+            })
+            .collect())
+    }
+}
+
+/// Convert an internal AssetRecord to the RPC-facing AssetInfo, including
+/// the new fields (transfer_mode, registrar, requires_kyc, redemption_pool,
+/// asset_class).
+fn asset_to_info(a: &vtt_state::AssetRecord) -> AssetInfo {
+    use vtt_state::asset::{AssetClass, TransferMode};
+    let asset_class = match &a.class {
+        AssetClass::Equity => "equity".to_string(),
+        AssetClass::Debt => "debt".to_string(),
+        AssetClass::RealEstate => "real_estate".to_string(),
+        AssetClass::Commodity => "commodity".to_string(),
+        AssetClass::Fund => "fund".to_string(),
+        AssetClass::IntellectualProperty => "ip".to_string(),
+        AssetClass::CarbonCredit => "carbon".to_string(),
+        AssetClass::Invoice => "invoice".to_string(),
+        AssetClass::Custom(s) => format!("custom:{s}"),
+    };
+    let transfer_mode = match a.transfer_mode {
+        TransferMode::PeerToPeer => "PeerToPeer".to_string(),
+        TransferMode::RegistrarMediated => "RegistrarMediated".to_string(),
+    };
+    AssetInfo {
+        id: a.id,
+        name: a.name.clone(),
+        symbol: a.symbol.clone(),
+        issuer: a.issuer,
+        total_supply: a.total_supply,
+        status: a.status_str().to_string(),
+        decimals: a.decimals,
+        jurisdiction: a.jurisdiction.clone(),
+        legal_entity: a.legal_entity.clone(),
+        transfer_mode,
+        registrar: a.registrar,
+        requires_kyc: a.requires_kyc,
+        redemption_pool: a.redemption_pool,
+        asset_class,
     }
 }
 

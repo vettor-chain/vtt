@@ -10,6 +10,7 @@ description = "JSON-RPC server for VTT blockchain"
 vtt-primitives = { workspace = true }
 vtt-crypto = { workspace = true }
 vtt-chain = { workspace = true }
+vtt-state = { workspace = true }
 vtt-dex = { path = "../vtt-dex" }
 vtt-txpool = { workspace = true }
 vtt-telemetry = { path = "../vtt-telemetry" }
@@ -28,4 +29,3 @@ vtt-consensus = { workspace = true }
 
 [dev-dependencies]
 vtt-genesis = { workspace = true }
-vtt-state = { workspace = true }

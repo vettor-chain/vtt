@@ -804,6 +804,9 @@ impl StateDB {
     }
 
     /// Record a slashing event in persistent storage for audit/query purposes.
+    /// Writes two keys: the per-event `slash:<addr><epoch>` entry and a
+    /// per-validator `slash:history:<addr>` blob containing the accumulated
+    /// history as Vec<(epoch, reason, amount_raw)> for easy enumeration.
     pub fn record_slash(&mut self, validator: &Address, epoch: u64, reason: &str, amount: Amount) {
         if let Some(ref storage) = self.storage {
             let mut key = b"slash:".to_vec();
@@ -811,7 +814,44 @@ impl StateDB {
             key.extend_from_slice(&epoch.to_be_bytes());
             let value = format!("{}:{}", reason, amount.raw());
             let _ = storage.put(Column::ChainMeta, &key, value.as_bytes());
+
+            // Append to per-validator history blob
+            let mut history = self.slashing_history_raw(validator);
+            history.push((epoch, reason.to_string(), amount.raw()));
+            let mut hist_key = b"slash:history:".to_vec();
+            hist_key.extend_from_slice(validator.as_bytes());
+            if let Ok(bytes) = borsh::to_vec(&history) {
+                let _ = storage.put(Column::ChainMeta, &hist_key, &bytes);
+            }
         }
+    }
+
+    /// Read the raw slashing history blob for a validator.
+    /// Returns Vec<(epoch, reason, amount_raw)>.
+    pub fn slashing_history_raw(&self, validator: &Address) -> Vec<(u64, String, u128)> {
+        if let Some(ref storage) = self.storage {
+            let mut key = b"slash:history:".to_vec();
+            key.extend_from_slice(validator.as_bytes());
+            if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, &key) {
+                if let Ok(items) = borsh::from_slice::<Vec<(u64, String, u128)>>(&bytes) {
+                    return items;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Slashing history for a validator, as RPC-ready records.
+    pub fn slashing_history(&self, validator: &Address) -> Vec<crate::SlashRecord> {
+        self.slashing_history_raw(validator)
+            .into_iter()
+            .map(|(epoch, reason, amount_raw)| crate::SlashRecord {
+                validator: *validator,
+                epoch,
+                reason,
+                amount: Amount::from_raw(amount_raw),
+            })
+            .collect()
     }
 
     /// Check if slashing evidence for (offender, epoch, slot) has already been

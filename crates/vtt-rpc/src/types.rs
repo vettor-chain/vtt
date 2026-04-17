@@ -125,6 +125,24 @@ pub struct AssetInfo {
     pub decimals: u8,
     pub jurisdiction: String,
     pub legal_entity: String,
+    /// "PeerToPeer" | "RegistrarMediated"
+    pub transfer_mode: String,
+    /// Registrar address (hex) if transfer_mode is RegistrarMediated, else None.
+    pub registrar: Option<Address>,
+    /// True if transfers require sender and recipient to have KYC approval on-chain.
+    pub requires_kyc: bool,
+    /// Total redemption pool available for pro-rata claim (only relevant in RedemptionPending).
+    pub redemption_pool: Amount,
+    pub asset_class: String,
+}
+
+/// A slashing event record returned by vtt_getSlashingHistory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SlashRecordInfo {
+    pub validator: Address,
+    pub epoch: u64,
+    pub reason: String,
+    pub amount: Amount,
 }
 
 /// RPC response for asset balance.
