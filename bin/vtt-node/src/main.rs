@@ -158,9 +158,13 @@ async fn main() {
     } else {
         Chain::new(consensus, genesis_config.chain.gas.clone())
     };
-    chain
-        .init_genesis(genesis_result.block, genesis_result.state)
-        .expect("failed to initialize genesis");
+    // Only init genesis when the chain is actually empty — a warm restart
+    // has already rehydrated the chain from RocksDB via with_storage.
+    if chain.head_hash().is_none() {
+        chain
+            .init_genesis(genesis_result.block, genesis_result.state)
+            .expect("failed to initialize genesis");
+    }
 
     info!(height = chain.height().unwrap_or(0), "chain initialized");
 

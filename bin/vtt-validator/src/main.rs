@@ -196,9 +196,20 @@ async fn main() {
     } else {
         Chain::new(consensus, gas_config.clone())
     };
-    chain
-        .init_genesis(genesis_result.block, genesis_result.state)
-        .expect("genesis init failed");
+    // Only init genesis when the chain is actually empty. On a warm start
+    // `with_storage` has already rehydrated the full chain from RocksDB, so
+    // calling `init_genesis` would refuse with GenesisAlreadySet and crash
+    // the validator in a restart loop.
+    if chain.head_hash().is_none() {
+        chain
+            .init_genesis(genesis_result.block, genesis_result.state)
+            .expect("genesis init failed");
+    } else {
+        info!(
+            height = chain.height().unwrap_or(0),
+            "resumed chain from persistent storage; skipping genesis init"
+        );
+    }
 
     // Optional weak subjectivity checkpoint:
     //   --checkpoint <block_number>:<hex-hash>
