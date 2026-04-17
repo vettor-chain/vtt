@@ -2338,6 +2338,124 @@ mod tests {
     }
 
     #[test]
+    fn delegation_rejected_for_address_without_self_stake() {
+        let ghost_kp = Keypair::from_seed(&[0x99u8; 32]);
+        let del_kp = Keypair::from_seed(&[0x02u8; 32]);
+        let ghost_addr = ghost_kp.address();
+        let del_addr = del_kp.address();
+
+        let mut state = StateDB::new();
+        state
+            .add_balance(&del_addr, Amount::from_vtt(100_000))
+            .unwrap();
+
+        // Attempt to delegate to an address that has never self-staked.
+        let tx = make_signed_tx(
+            &del_kp,
+            0,
+            TransactionAction::Stake {
+                validator: ghost_addr,
+                amount: Amount::from_vtt(50_000),
+            },
+        );
+        let result = execute_transaction(&mut state, &tx, &gas_config());
+        assert!(
+            !result.receipt.success,
+            "delegation to an address without self-stake must fail"
+        );
+        // The ghost validator must NOT have been registered as a staker.
+        assert!(
+            state.get_account(&ghost_addr).staking.is_none()
+                || state
+                    .get_account(&ghost_addr)
+                    .staking
+                    .as_ref()
+                    .map(|s| s.total_stake.is_zero())
+                    .unwrap_or(true),
+            "ghost validator must not appear in the staking set"
+        );
+    }
+
+    #[test]
+    fn asset_transfer_rejects_non_kyc_when_required() {
+        use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus, TransferMode};
+
+        let issuer_kp = Keypair::from_seed(&[0x21u8; 32]);
+        let recipient_kp = Keypair::from_seed(&[0x22u8; 32]);
+        let issuer_addr = issuer_kp.address();
+        let recipient_addr = recipient_kp.address();
+
+        let mut state = StateDB::new();
+        state
+            .add_balance(&issuer_addr, Amount::from_vtt(10_000))
+            .unwrap();
+
+        let asset_id = H256::from([0x44; 32]);
+        state
+            .register_asset(AssetRecord {
+                id: asset_id,
+                name: "Regulated Real Estate".into(),
+                symbol: "RRE".into(),
+                class: AssetClass::RealEstate,
+                origin_chain: vtt_primitives::ChainId::RELAY,
+                issuer: issuer_addr,
+                total_supply: Amount::from_vtt(1_000),
+                decimals: 18,
+                status: AssetStatus::Active,
+                compliance_policy: None,
+                valuation_oracle: None,
+                documents: Default::default(),
+                metadata_uri: String::new(),
+                jurisdiction: "IT".into(),
+                legal_entity: "Test SPV".into(),
+                transfer_mode: TransferMode::PeerToPeer,
+                registrar: None,
+                redemption_pool: Amount::ZERO,
+                requires_kyc: true,
+                created_at: 0,
+            })
+            .unwrap();
+        let mut issuer_ownership = state.get_ownership(&asset_id, &issuer_addr);
+        issuer_ownership.credit(Amount::from_vtt(1_000));
+        state.put_ownership(issuer_ownership);
+
+        let tx = make_signed_tx(
+            &issuer_kp,
+            0,
+            TransactionAction::AssetTransfer {
+                asset_id,
+                to: recipient_addr,
+                amount: Amount::from_vtt(100),
+            },
+        );
+        let result = execute_transaction(&mut state, &tx, &gas_config());
+        assert!(
+            !result.receipt.success,
+            "transfer of KYC-required asset must fail without approvals"
+        );
+
+        // Approve both parties on-chain and retry.
+        state.set_kyc_approved(&issuer_addr, true);
+        state.set_kyc_approved(&recipient_addr, true);
+        let tx2 = make_signed_tx(
+            &issuer_kp,
+            1,
+            TransactionAction::AssetTransfer {
+                asset_id,
+                to: recipient_addr,
+                amount: Amount::from_vtt(100),
+            },
+        );
+        let result2 = execute_transaction(&mut state, &tx2, &gas_config());
+        assert!(
+            result2.receipt.success,
+            "transfer must succeed after KYC approvals"
+        );
+        let recipient_ownership = state.get_ownership(&asset_id, &recipient_addr);
+        assert_eq!(recipient_ownership.available, Amount::from_vtt(100));
+    }
+
+    #[test]
     fn execute_stake_and_unstake() {
         let val_kp = Keypair::from_seed(&[1u8; 32]);
         let val_addr = val_kp.address();

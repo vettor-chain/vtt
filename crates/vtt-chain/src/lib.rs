@@ -933,6 +933,100 @@ mod tests {
     }
 
     #[test]
+    fn stakers_index_warms_elect_validators_after_restart() {
+        use vtt_state::account::StakingState;
+        use vtt_storage::memory::InMemoryStore;
+
+        let storage: Arc<dyn vtt_storage::KeyValueStore> = Arc::new(InMemoryStore::new());
+        let val_addr = Address::from([0x10; 20]);
+
+        // First run: write a staking account, verify elect returns it.
+        {
+            let mut db = StateDB::with_storage(storage.clone());
+            let mut account = AccountState::with_balance(Amount::from_vtt(500_000));
+            account.staking = Some(StakingState {
+                total_stake: Amount::from_vtt(100_000),
+                self_stake: Amount::from_vtt(100_000),
+                commission_bps: 500,
+                active: true,
+                delegations: Vec::new(),
+                unbonding: Vec::new(),
+            });
+            db.put_account(val_addr, account);
+
+            let consensus = test_consensus();
+            let set = consensus.elect_validators(&db, 0);
+            assert_eq!(set.validators.len(), 1);
+            assert_eq!(set.validators[0].address, val_addr);
+        }
+
+        // Second run: fresh StateDB with same storage. Stakers index must be
+        // loaded and the accounts cache warmed so elect_validators still finds
+        // the validator even though we never explicitly re-inserted it.
+        {
+            let db = StateDB::with_storage(storage);
+            let consensus = test_consensus();
+            let set = consensus.elect_validators(&db, 0);
+            assert_eq!(
+                set.validators.len(),
+                1,
+                "elect_validators must find staker after restart"
+            );
+            assert_eq!(set.validators[0].address, val_addr);
+        }
+    }
+
+    #[test]
+    fn iter_caches_warmed_after_restart() {
+        use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus, TransferMode};
+        use vtt_storage::memory::InMemoryStore;
+
+        let storage: Arc<dyn vtt_storage::KeyValueStore> = Arc::new(InMemoryStore::new());
+        let asset_id = H256::from([0xAA; 32]);
+
+        // First run: register an asset.
+        {
+            let mut db = StateDB::with_storage(storage.clone());
+            db.register_asset(AssetRecord {
+                id: asset_id,
+                name: "Test Asset".into(),
+                symbol: "TST".into(),
+                class: AssetClass::Equity,
+                origin_chain: vtt_primitives::ChainId::RELAY,
+                issuer: Address::from([0x01; 20]),
+                total_supply: Amount::from_vtt(1_000),
+                decimals: 18,
+                status: AssetStatus::Active,
+                compliance_policy: None,
+                valuation_oracle: None,
+                documents: Default::default(),
+                metadata_uri: String::new(),
+                jurisdiction: "IT".into(),
+                legal_entity: "Test SPV".into(),
+                transfer_mode: TransferMode::PeerToPeer,
+                registrar: None,
+                redemption_pool: Amount::ZERO,
+                requires_kyc: true,
+                created_at: 0,
+            })
+            .unwrap();
+            assert_eq!(db.asset_count(), 1);
+        }
+
+        // Second run: fresh StateDB with same storage, iter_assets must show
+        // the asset (warmed from disk via prefix_scan).
+        {
+            let db = StateDB::with_storage(storage);
+            assert_eq!(
+                db.asset_count(),
+                1,
+                "asset cache must be warmed from storage on restart"
+            );
+            assert!(db.get_asset(&asset_id).is_some());
+        }
+    }
+
+    #[test]
     fn unbonding_and_slashing_seen_survive_restart() {
         use vtt_state::account::UnbondingEntry;
         use vtt_storage::memory::InMemoryStore;
