@@ -38,8 +38,9 @@ fn usage() -> ! {
         "vtt-relayer\n\
          \n\
          Usage:\n  \
-           vtt-relayer watch        --eth-rpc URL --bridge-addr 0x… --vtt-rpc URL [--poll-ms 15000]\n  \
-           vtt-relayer submit       --vtt-rpc URL --source-tx-hash 0x… --source-chain N \\\n                                    --recipient 0x… --token 0x… --amount <raw-u128>\n\
+           vtt-relayer watch            --eth-rpc URL --bridge-addr 0x… --vtt-rpc URL [--poll-ms 15000]\n  \
+           vtt-relayer submit           --vtt-rpc URL --source-tx-hash 0x… --source-chain N \\\n                                        --recipient 0x… --token 0x… --amount <raw-u128>\n  \
+           vtt-relayer list-withdrawals --vtt-rpc URL\n\
          \n\
          Common flags:\n  \
            --relayer-seed HEX      32-byte seed (hex). Alt: env RELAYER_SEED.\n  \
@@ -213,6 +214,22 @@ async fn run_submit(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// List pending BridgeWithdraw events on the VTT chain. Used as the first
+/// half of the VTT -> Ethereum relay flow: the operator (or a downstream
+/// EVM integration layered on alloy) takes the JSON and calls `release()`
+/// on the Solidity bridge contract. Idempotency and replay protection live
+/// in the Solidity contract (processedWithdrawals mapping).
+async fn run_list_withdrawals(args: &[String]) -> Result<()> {
+    let vtt_rpc = flag(args, "--vtt-rpc").ok_or_else(|| anyhow!("--vtt-rpc required"))?;
+    let client = vtt_client(&vtt_rpc).await?;
+    let withdrawals: serde_json::Value = client
+        .request("vtt_getBridgeWithdrawals", rpc_params![])
+        .await
+        .context("vtt_getBridgeWithdrawals failed")?;
+    println!("{}", serde_json::to_string_pretty(&withdrawals)?);
+    Ok(())
+}
+
 async fn run_watch(args: &[String]) -> Result<()> {
     let vtt_rpc = flag(args, "--vtt-rpc").ok_or_else(|| anyhow!("--vtt-rpc required"))?;
     let eth_rpc = flag(args, "--eth-rpc").ok_or_else(|| anyhow!("--eth-rpc required"))?;
@@ -230,27 +247,40 @@ async fn run_watch(args: &[String]) -> Result<()> {
 
     let client = vtt_client(&vtt_rpc).await?;
 
-    // Minimal liveness loop. The Ethereum event-scanning integration is
-    // intentionally left to a dedicated task that the operator can fill in
-    // using `alloy` (preferred) or raw `eth_getLogs` JSON-RPC calls. The
-    // tx-submission path above is ready: once each Deposit event is decoded
-    // to (source_tx_hash, source_chain, recipient, token, amount), feed it
-    // into `submit_bridge_deposit` with a fresh nonce.
+    // Liveness loop polling both directions.
+    //   ETH -> VTT: scan Deposit events on the Solidity bridge, submit
+    //              BridgeDeposit tx on VTT (pending alloy integration).
+    //   VTT -> ETH: fetch BridgeWithdraw events via vtt_getBridgeWithdrawals,
+    //              log them so a downstream EVM layer can call release().
+    // Current implementation performs the VTT-side query so operators can
+    // see what is pending. The ETH-side event scan is the remaining TODO.
     let mut ticker = tokio::time::interval(Duration::from_millis(poll_ms));
     loop {
         ticker.tick().await;
         match fetch_nonce(&client, &relayer_addr).await {
-            Ok(n) => debug!(nonce = n, "relayer alive, polling Ethereum (stub)"),
+            Ok(n) => debug!(nonce = n, "relayer alive"),
             Err(e) => warn!(%e, "VTT RPC unreachable"),
         }
-        // TODO: query Ethereum logs and submit new deposits. Signature
-        // Deposit(uint256,address,address,uint256,uint256,bytes32) topic0
-        // = keccak256("Deposit(uint256,address,address,uint256,uint256,bytes32)")
-        // Decode args, then:
-        //   submit_bridge_deposit(&client, &keypair, chain_id, gas_price,
-        //                         fetch_nonce(&client, &relayer_addr).await?,
-        //                         tx_hash_b32, source_chain, recipient,
-        //                         token, amount).await?;
+        // Report pending withdrawals so an external EVM client (or the
+        // operator) can release them on the Solidity bridge.
+        match client
+            .request::<serde_json::Value, _>("vtt_getBridgeWithdrawals", rpc_params![])
+            .await
+        {
+            Ok(v) => {
+                let count = v.as_array().map(|a| a.len()).unwrap_or(0);
+                if count > 0 {
+                    info!(
+                        count,
+                        "pending VTT -> ETH withdrawals; call release() on Solidity bridge"
+                    );
+                    debug!(withdrawals = %v, "withdrawal payload");
+                }
+            }
+            Err(e) => warn!(%e, "failed to query bridge withdrawals"),
+        }
+        // TODO (alloy integration): query Ethereum logs for Deposit events
+        // and submit BridgeDeposit via submit_bridge_deposit(...).
     }
 }
 
@@ -269,6 +299,7 @@ async fn main() {
     let result = match args[1].as_str() {
         "watch" => run_watch(&args).await,
         "submit" => run_submit(&args).await,
+        "list-withdrawals" => run_list_withdrawals(&args).await,
         _ => {
             usage();
         }
