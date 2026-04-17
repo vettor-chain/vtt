@@ -1481,6 +1481,36 @@ fn execute_create_asset(
     Ok(())
 }
 
+/// Force-close a RedemptionPending asset via governance. Asset must currently
+/// be in `RedemptionPending`. Any unclaimed balance in the redemption pool is
+/// swept to the treasury so it is not locked forever. Transitions the asset
+/// to `Redeemed`.
+fn execute_finalize_redemption(state: &mut StateDB, asset_id: &H256) -> Result<(), ExecutionError> {
+    let asset = state
+        .get_asset(asset_id)
+        .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+    if asset.status != AssetStatus::RedemptionPending {
+        return Err(ExecutionError::Custom(
+            "FinalizeRedemption only applies to assets in RedemptionPending".into(),
+        ));
+    }
+    let remaining = asset.redemption_pool;
+    let treasury = state.get_treasury_address();
+
+    let asset_mut = state
+        .get_asset_mut(asset_id)
+        .ok_or_else(|| ExecutionError::Custom(format!("asset not found: {asset_id}")))?;
+    asset_mut.status = AssetStatus::Redeemed;
+    asset_mut.redemption_pool = Amount::ZERO;
+
+    if !remaining.is_zero() {
+        state
+            .add_balance(&treasury, remaining)
+            .map_err(|e| ExecutionError::Custom(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Execute on-chain revenue distribution: debit VTT from sender (the asset issuer)
 /// and credit each holder proportionally to their available holdings.
 fn execute_distribute_revenue(
@@ -1595,6 +1625,17 @@ fn execute_propose_asset_action(
                 need: *total_amount,
             });
         }
+    }
+
+    // FinalizeRedemption only makes sense once the asset has been moved to
+    // RedemptionPending by a prior DisposeAsset vote — reject the proposal
+    // upfront rather than wasting a voting period on an impossible action.
+    if matches!(action, AssetProposalAction::FinalizeRedemption { .. })
+        && asset.status != AssetStatus::RedemptionPending
+    {
+        return Err(ExecutionError::Custom(
+            "FinalizeRedemption can only be proposed on an asset in RedemptionPending".into(),
+        ));
     }
 
     // Create proposal with unique ID (blake3 hash of asset_id + proposer + block_number + nonce)
@@ -1730,9 +1771,9 @@ fn execute_finalize_asset_proposal(
     // Check threshold based on action type
     let passes = if has_quorum {
         match &action {
-            AssetProposalAction::ChangeIssuer { .. } | AssetProposalAction::DisposeAsset { .. } => {
-                proposal.passes_supermajority()
-            }
+            AssetProposalAction::ChangeIssuer { .. }
+            | AssetProposalAction::DisposeAsset { .. }
+            | AssetProposalAction::FinalizeRedemption { .. } => proposal.passes_supermajority(),
             _ => proposal.passes_threshold(),
         }
     } else {
@@ -1767,6 +1808,9 @@ fn execute_finalize_asset_proposal(
                     ExecutionError::Custom(format!("asset not found: {asset_id}"))
                 })?;
                 asset_mut.status = AssetStatus::RedemptionPending;
+            }
+            AssetProposalAction::FinalizeRedemption { .. } => {
+                execute_finalize_redemption(state, &asset_id)?;
             }
         }
 
@@ -3237,6 +3281,87 @@ mod tests {
         // Clear by passing empty string
         execute_set_address_jurisdiction(&mut state, &treasury, &target, "").unwrap();
         assert_eq!(state.get_address_jurisdiction(&target), None);
+    }
+
+    #[test]
+    fn finalize_redemption_sweeps_pool_to_treasury() {
+        use std::collections::BTreeMap;
+        use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus, TransferMode};
+
+        let mut state = StateDB::new();
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let asset_id = H256::from([0x77; 32]);
+        let issuer = Address::from([0x22; 20]);
+        let asset = AssetRecord {
+            id: asset_id,
+            name: "Sellable".to_string(),
+            symbol: "SELL".to_string(),
+            class: AssetClass::RealEstate,
+            origin_chain: vtt_primitives::ChainId::RELAY,
+            issuer,
+            total_supply: Amount::from_vtt(1_000_000),
+            decimals: 0,
+            status: AssetStatus::RedemptionPending,
+            compliance_policy: None,
+            valuation_oracle: None,
+            documents: BTreeMap::new(),
+            metadata_uri: String::new(),
+            jurisdiction: "IT".to_string(),
+            legal_entity: "SPV".to_string(),
+            transfer_mode: TransferMode::PeerToPeer,
+            registrar: None,
+            redemption_pool: Amount::from_vtt(5_000),
+            requires_kyc: false,
+            created_at: 0,
+        };
+        state.register_asset(asset).unwrap();
+
+        execute_finalize_redemption(&mut state, &asset_id).unwrap();
+
+        let finalized = state.get_asset(&asset_id).cloned().unwrap();
+        assert_eq!(finalized.status, AssetStatus::Redeemed);
+        assert_eq!(finalized.redemption_pool, Amount::ZERO);
+        assert_eq!(state.get_balance(&treasury), Amount::from_vtt(5_000));
+    }
+
+    #[test]
+    fn finalize_redemption_rejects_non_pending_asset() {
+        use std::collections::BTreeMap;
+        use vtt_state::asset::{AssetClass, AssetRecord, AssetStatus, TransferMode};
+
+        let mut state = StateDB::new();
+        let asset_id = H256::from([0x88; 32]);
+        let asset = AssetRecord {
+            id: asset_id,
+            name: "Active".to_string(),
+            symbol: "ACT".to_string(),
+            class: AssetClass::Equity,
+            origin_chain: vtt_primitives::ChainId::RELAY,
+            issuer: Address::from([0x22; 20]),
+            total_supply: Amount::from_vtt(1_000),
+            decimals: 0,
+            status: AssetStatus::Active,
+            compliance_policy: None,
+            valuation_oracle: None,
+            documents: BTreeMap::new(),
+            metadata_uri: String::new(),
+            jurisdiction: "IT".to_string(),
+            legal_entity: "X".to_string(),
+            transfer_mode: TransferMode::PeerToPeer,
+            registrar: None,
+            redemption_pool: Amount::ZERO,
+            requires_kyc: false,
+            created_at: 0,
+        };
+        state.register_asset(asset).unwrap();
+
+        let err = execute_finalize_redemption(&mut state, &asset_id).expect_err("must fail");
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("RedemptionPending")),
+            _ => panic!("expected Custom error"),
+        }
     }
 
     #[test]

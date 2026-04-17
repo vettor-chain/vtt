@@ -1433,6 +1433,7 @@ fn proposal_to_info(p: &vtt_primitives::asset_governance::AssetProposal) -> Asse
         AssetProposalAction::ChangeIssuer { .. } => "ChangeIssuer",
         AssetProposalAction::Signal { .. } => "Signal",
         AssetProposalAction::DisposeAsset { .. } => "DisposeAsset",
+        AssetProposalAction::FinalizeRedemption { .. } => "FinalizeRedemption",
     }
     .to_string();
 

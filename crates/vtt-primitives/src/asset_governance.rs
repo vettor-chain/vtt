@@ -27,6 +27,12 @@ pub enum AssetProposalAction {
     /// Off-chain: authorizes the SPV to proceed with the sale via notary/legal.
     /// Requires supermajority (67%).
     DisposeAsset { reason: String },
+
+    /// Force-close an asset sitting in `RedemptionPending` once the redemption
+    /// window has elapsed. Transitions the asset to `Redeemed`; any unclaimed
+    /// balance in the redemption pool is swept to the treasury so it is not
+    /// locked forever. Requires supermajority (67%).
+    FinalizeRedemption { reason: String },
 }
 
 /// Status of an asset governance proposal.
