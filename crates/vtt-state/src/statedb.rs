@@ -1082,10 +1082,89 @@ impl StateDB {
         // iterates the in-memory map) sees their staking state after resume.
         let addrs: Vec<Address> = self.stakers.iter().copied().collect();
         for addr in addrs {
-            if let Some(ref storage) = self.storage {
-                if let Ok(Some(bytes)) = storage.get(Column::Accounts, addr.as_bytes()) {
-                    if let Ok(account) = borsh::from_slice::<AccountState>(&bytes) {
-                        self.accounts.insert(addr, account);
+            if let Ok(Some(bytes)) = storage.get(Column::Accounts, addr.as_bytes()) {
+                if let Ok(account) = borsh::from_slice::<AccountState>(&bytes) {
+                    self.accounts.insert(addr, account);
+                }
+            }
+        }
+
+        // Warm the asset / pool / proposal / oracle caches via prefix_scan.
+        // Without this the corresponding iter_* methods (used by explorer +
+        // governance UI) return empty until a new entry is created, even
+        // though the data is present on disk and `get_*` returns it.
+        if let Ok(entries) = storage.prefix_scan(Column::Assets, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    if let Ok(asset) = borsh::from_slice::<AssetRecord>(&value) {
+                        self.assets.insert(H256::from(arr), asset);
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = storage.prefix_scan(Column::Pools, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    self.pools.insert(H256::from(arr), value);
+                }
+            }
+        }
+        if let Ok(entries) = storage.prefix_scan(Column::MiningStates, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    self.mining_states.insert(H256::from(arr), value);
+                }
+            }
+        }
+        if let Ok(entries) = storage.prefix_scan(Column::AssetProposals, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    if let Ok(proposal) = borsh::from_slice::<AssetProposal>(&value) {
+                        self.asset_proposals.insert(H256::from(arr), proposal);
+                    }
+                }
+            }
+        }
+        if let Ok(entries) = storage.prefix_scan(Column::Oracles, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    if let Ok(feed) = borsh::from_slice::<OracleFeed>(&value) {
+                        self.oracles.insert(H256::from(arr), feed);
+                    }
+                }
+            }
+        }
+        // Governance proposals live in ChainMeta with the "gov:" prefix.
+        if let Ok(entries) = storage.prefix_scan(Column::ChainMeta, b"gov:") {
+            for (key, value) in entries {
+                if key.len() == 4 + 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key[4..]);
+                    self.governance_proposals.insert(H256::from(arr), value);
+                }
+            }
+        }
+        // Ownership records: key = asset_id (32) || owner (20) = 52 bytes.
+        if let Ok(entries) = storage.prefix_scan(Column::Ownership, b"") {
+            for (key, value) in entries {
+                if key.len() == 52 {
+                    let mut asset_arr = [0u8; 32];
+                    asset_arr.copy_from_slice(&key[..32]);
+                    let mut owner_arr = [0u8; 20];
+                    owner_arr.copy_from_slice(&key[32..]);
+                    if let Ok(record) = borsh::from_slice::<OwnershipRecord>(&value) {
+                        self.ownership
+                            .insert((H256::from(asset_arr), Address::from(owner_arr)), record);
                     }
                 }
             }

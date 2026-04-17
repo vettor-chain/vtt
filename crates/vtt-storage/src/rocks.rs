@@ -121,6 +121,31 @@ impl KeyValueStore for RocksStore {
             .write(batch)
             .map_err(|e| StorageError::Io(e.to_string()))
     }
+
+    fn prefix_scan(&self, column: Column, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let cf = self
+            .db
+            .cf_handle(column.name())
+            .ok_or_else(|| StorageError::ColumnNotFound(column.name().to_string()))?;
+        let mut out = Vec::new();
+        if prefix.is_empty() {
+            let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (k, v) = item.map_err(|e| StorageError::Io(e.to_string()))?;
+                out.push((k.to_vec(), v.to_vec()));
+            }
+        } else {
+            let iter = self.db.prefix_iterator_cf(&cf, prefix);
+            for item in iter {
+                let (k, v) = item.map_err(|e| StorageError::Io(e.to_string()))?;
+                if !k.starts_with(prefix) {
+                    break;
+                }
+                out.push((k.to_vec(), v.to_vec()));
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

@@ -113,4 +113,8 @@ pub trait KeyValueStore: Send + Sync {
     fn contains(&self, column: Column, key: &[u8]) -> Result<bool> {
         Ok(self.get(column, key)?.is_some())
     }
+    /// Return all (key, value) pairs in `column` whose key starts with `prefix`.
+    /// Used at startup to warm in-memory caches from persistent storage.
+    /// Order is unspecified. An empty prefix returns everything in the column.
+    fn prefix_scan(&self, column: Column, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 }

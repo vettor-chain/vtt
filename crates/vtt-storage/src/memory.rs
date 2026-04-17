@@ -66,6 +66,19 @@ impl KeyValueStore for InMemoryStore {
         }
         Ok(())
     }
+
+    fn prefix_scan(&self, column: Column, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let data = self.data.read().unwrap();
+        let col = match data.get(&column) {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        Ok(col
+            .iter()
+            .filter(|(k, _)| prefix.is_empty() || k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
 }
 
 #[cfg(test)]
