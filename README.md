@@ -15,10 +15,13 @@ Layer 1 blockchain for tokenizing real-world assets. Built in Rust with DPoS con
 - **WASM Smart Contracts** -- Write contracts in Rust, compile to WASM, deterministic gas metering
 - **Built-in DEX** -- Constant product AMM, multi-pool, LP tokens, auto-liquidity
 - **Cross-chain Bridge** -- Custodial bridge to Ethereum and Base, wVTT (ERC-20)
-- **On-chain Governance** -- Proposal system with 7-day voting, 33% quorum, 24h execution timelock
-- **RWA Tokenization** -- Fractional ownership, revenue distribution, asset governance
-- **Slashing** -- Double-sign (5%) and downtime (0.1%) penalties
+- **On-chain Governance** -- Proposal system with 7-day voting, 33% quorum, 24h execution timelock, whitelisted `ParameterChange` keys
+- **RWA Tokenization** -- Fractional ownership, revenue distribution, asset governance, RedemptionPending lifecycle
+- **Compliance** -- On-chain KYC flag, per-address jurisdiction, chain-wide whitelist/blacklist, `max_holders_per_asset` cap
+- **Oracles** -- Treasury-gated feed registration, M-of-N authorised sources with median quorum aggregation
+- **Slashing** -- Double-sign (5%) and downtime (0.1%) penalties, automatic double-sign detection
 - **Deflationary** -- 70% of gas fees burned
+- **Schema versioning** -- RocksDB stamped with a schema version on open; incompatible binaries refuse to start
 
 ## Architecture
 
@@ -121,6 +124,12 @@ The validator exposes a JSON-RPC 2.0 API on port 9944. Key methods:
 | `vtt_getSwapQuote` | Get DEX swap quote |
 | `vtt_listProposals` | List governance proposals |
 | `vtt_getNodeMetrics` | Prometheus metrics (JSON) |
+| `vtt_listOracles` | List registered oracle feeds |
+| `vtt_getOracle` | Latest aggregated value for a feed |
+| `vtt_isKycApproved` | On-chain KYC flag for an address |
+| `vtt_getBridgeRelayer` | Address authorised to submit BridgeDeposit |
+| `vtt_getSlashingHistory` | Slashing events recorded for a validator |
+| `vtt_getTransactionReceipt` | Receipt (logs, gas used) for a tx hash |
 
 Full API documentation: [docs](https://testnet.vettor.org/docs)
 

@@ -260,5 +260,23 @@ RocksDB automatically prunes old block bodies and receipts every 10,000 blocks. 
 
 - CORS enabled (configurable)
 - Per-IP rate limiting on transaction submission (10/sec default)
-- Request body size limit: 1 MB
+- Per-IP rate limiting on heavy reads — `listTransactions`, `getTransactionsByAddress`, `getBridgeWithdrawals` (60/sec default)
+- Request body size limit: 4 MiB (fits DeployContract with up to ~1 MiB of WASM)
+- `sendTransaction` hex payload capped at 2 MiB before decode
+- Chain-walking reads bounded to the most recent 20,000 blocks per request
+- Internal errors are logged server-side and redacted in RPC responses
 - Response pagination: max 100 items per query
+
+## 16. DB Schema Versioning
+
+On first open, RocksDB gets a `schema:version` stamp under ChainMeta. On every
+subsequent start the validator verifies the stamp against the binary's
+`DB_SCHEMA_VERSION`:
+
+- Match → proceed normally.
+- Absent → stamp current version (fresh or legacy DB) and proceed.
+- Mismatch → panic on startup; a binary mismatched with the on-disk schema
+  refuses to run rather than silently corrupting state.
+
+When upgrading across a schema bump, wipe the data directory (testnet) or
+follow the migration documented in the release notes.
