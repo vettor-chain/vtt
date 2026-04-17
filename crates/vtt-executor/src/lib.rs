@@ -666,6 +666,29 @@ fn execute_action(
         TransactionAction::SetAddressJurisdiction { address, country } => {
             execute_set_address_jurisdiction(state, sender, address, country)
         }
+
+        TransactionAction::CreateOracleFeed {
+            feed_id,
+            name,
+            feed_type,
+            authorized_sources,
+            quorum,
+            max_staleness_ms,
+        } => execute_create_oracle_feed(
+            state,
+            sender,
+            *feed_id,
+            name,
+            feed_type,
+            authorized_sources,
+            *quorum,
+            *max_staleness_ms,
+            block_number,
+        ),
+
+        TransactionAction::SubmitOracleValue { feed_id, value } => {
+            execute_submit_oracle_value(state, sender, feed_id, *value, block_timestamp)
+        }
     }
 }
 
@@ -807,6 +830,122 @@ fn execute_set_kyc_approval(
         address: *sender,
         topics: vec![blake3_hash(b"SetKycApproval")],
         data: borsh::to_vec(&(*address, approved)).unwrap_or_default(),
+    }])
+}
+
+/// Register a new oracle feed. Treasury-gated so the set of trusted sources
+/// is controlled. Duplicate feed_ids are rejected.
+#[allow(clippy::too_many_arguments)]
+fn execute_create_oracle_feed(
+    state: &mut StateDB,
+    sender: &Address,
+    feed_id: H256,
+    name: &str,
+    feed_type: &str,
+    authorized_sources: &[Address],
+    quorum: u8,
+    max_staleness_ms: u64,
+    block_number: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    let treasury = state.get_treasury_address();
+    if *sender != treasury {
+        return Err(ExecutionError::Custom(
+            "only the treasury / admin can create oracle feeds".into(),
+        ));
+    }
+    if name.is_empty() || name.len() > 128 {
+        return Err(ExecutionError::Custom(
+            "oracle feed name must be 1..=128 chars".into(),
+        ));
+    }
+    if feed_type.is_empty() || feed_type.len() > 64 {
+        return Err(ExecutionError::Custom(
+            "oracle feed_type must be 1..=64 chars".into(),
+        ));
+    }
+    if authorized_sources.is_empty() || authorized_sources.len() > 32 {
+        return Err(ExecutionError::Custom(
+            "oracle feed must have between 1 and 32 authorized sources".into(),
+        ));
+    }
+    if quorum == 0 || (quorum as usize) > authorized_sources.len() {
+        return Err(ExecutionError::Custom(
+            "oracle quorum must be between 1 and the number of authorized sources".into(),
+        ));
+    }
+
+    let parsed_type = match feed_type {
+        s if s.starts_with("price:") => vtt_state::oracle::OracleFeedType::MarketPrice(
+            s.trim_start_matches("price:").to_string(),
+        ),
+        s if s.starts_with("rate:") => vtt_state::oracle::OracleFeedType::InterestRate(
+            s.trim_start_matches("rate:").to_string(),
+        ),
+        s if s.starts_with("asset:") => {
+            let tail = s.trim_start_matches("asset:");
+            let hex_str = tail.strip_prefix("0x").unwrap_or(tail);
+            if hex_str.len() != 64 {
+                return Err(ExecutionError::Custom(
+                    "oracle feed_type 'asset:<hex>' expects 32-byte asset id".into(),
+                ));
+            }
+            let mut bytes = [0u8; 32];
+            for (i, b) in bytes.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).map_err(|_| {
+                    ExecutionError::Custom("oracle feed_type 'asset:<hex>': invalid hex".into())
+                })?;
+            }
+            vtt_state::oracle::OracleFeedType::AssetValuation(H256::from(bytes))
+        }
+        s => vtt_state::oracle::OracleFeedType::Custom(s.to_string()),
+    };
+
+    let mut feed = vtt_state::oracle::OracleFeed::new(
+        feed_id,
+        name.to_string(),
+        parsed_type,
+        authorized_sources.to_vec(),
+        quorum,
+        max_staleness_ms,
+    );
+    feed.created_at = block_number;
+    state.register_oracle(feed).map_err(|e| match e {
+        vtt_state::statedb::StateError::Serialization(s) if s.contains("already exists") => {
+            ExecutionError::Custom(format!("oracle feed_id already registered: {feed_id}"))
+        }
+        other => ExecutionError::Custom(other.to_string()),
+    })?;
+
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"CreateOracleFeed"), feed_id],
+        data: borsh::to_vec(&(
+            feed_id,
+            name.to_string(),
+            authorized_sources.to_vec(),
+            quorum,
+        ))
+        .unwrap_or_default(),
+    }])
+}
+
+/// Submit a new value to an existing oracle feed. Sender must be one of the
+/// feed's authorized sources. Quorum aggregation and persistence happen
+/// inside `StateDB::submit_oracle`.
+fn execute_submit_oracle_value(
+    state: &mut StateDB,
+    sender: &Address,
+    feed_id: &H256,
+    value: Amount,
+    block_timestamp: u64,
+) -> Result<Vec<Log>, ExecutionError> {
+    let reached = state
+        .submit_oracle(feed_id, *sender, value, block_timestamp)
+        .map_err(|e| ExecutionError::Custom(e.to_string()))?;
+    Ok(vec![Log {
+        address: *sender,
+        topics: vec![blake3_hash(b"SubmitOracleValue"), *feed_id],
+        data: borsh::to_vec(&(*sender, value, block_timestamp, reached)).unwrap_or_default(),
     }])
 }
 
@@ -1991,6 +2130,8 @@ fn calculate_gas_cost(action: &TransactionAction, config: &GasConfig) -> u64 {
         TransactionAction::ClaimRedemption { .. } => 80_000,
         TransactionAction::SetKycApproval { .. } => 30_000,
         TransactionAction::SetAddressJurisdiction { .. } => 30_000,
+        TransactionAction::CreateOracleFeed { .. } => 80_000,
+        TransactionAction::SubmitOracleValue { .. } => 40_000,
     }
 }
 
@@ -3096,6 +3237,118 @@ mod tests {
         // Clear by passing empty string
         execute_set_address_jurisdiction(&mut state, &treasury, &target, "").unwrap();
         assert_eq!(state.get_address_jurisdiction(&target), None);
+    }
+
+    #[test]
+    fn create_oracle_feed_requires_treasury() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let feed_id = H256::from([0xDE; 32]);
+        let sources = vec![Address::from([0x01; 20]), Address::from([0x02; 20])];
+        let impostor = Address::from([0xCC; 20]);
+        let err = execute_create_oracle_feed(
+            &mut state,
+            &impostor,
+            feed_id,
+            "BTC/USD",
+            "price:BTC/USD",
+            &sources,
+            2,
+            60_000,
+            0,
+        )
+        .expect_err("non-treasury must fail");
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("treasury")),
+            _ => panic!("expected Custom error"),
+        }
+
+        execute_create_oracle_feed(
+            &mut state,
+            &treasury,
+            feed_id,
+            "BTC/USD",
+            "price:BTC/USD",
+            &sources,
+            2,
+            60_000,
+            7,
+        )
+        .unwrap();
+        assert!(state.get_oracle(&feed_id).is_some());
+    }
+
+    #[test]
+    fn submit_oracle_value_reaches_quorum() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let feed_id = H256::from([0xDE; 32]);
+        let src_a = Address::from([0xA0; 20]);
+        let src_b = Address::from([0xB0; 20]);
+        let sources = vec![src_a, src_b];
+        execute_create_oracle_feed(
+            &mut state,
+            &treasury,
+            feed_id,
+            "BTC/USD",
+            "price:BTC/USD",
+            &sources,
+            2,
+            60_000,
+            0,
+        )
+        .unwrap();
+
+        execute_submit_oracle_value(&mut state, &src_a, &feed_id, Amount::from_vtt(60_000), 1000)
+            .unwrap();
+        // Quorum not reached yet
+        assert!(state.get_oracle(&feed_id).unwrap().latest_value.is_none());
+
+        execute_submit_oracle_value(&mut state, &src_b, &feed_id, Amount::from_vtt(62_000), 2000)
+            .unwrap();
+        // Now quorum reached; median of [60k, 62k] = 62k
+        assert_eq!(
+            state.get_oracle(&feed_id).unwrap().latest_value,
+            Some(Amount::from_vtt(62_000))
+        );
+    }
+
+    #[test]
+    fn submit_oracle_value_rejects_unauthorized() {
+        use vtt_storage::memory::InMemoryStore;
+        let storage = std::sync::Arc::new(InMemoryStore::new());
+        let mut state = StateDB::with_storage(storage);
+        let treasury = Address::from([0xAA; 20]);
+        state.set_treasury_address(treasury);
+
+        let feed_id = H256::from([0xDE; 32]);
+        let sources = vec![Address::from([0xA0; 20])];
+        execute_create_oracle_feed(
+            &mut state, &treasury, feed_id, "Custom", "custom", &sources, 1, 0, 0,
+        )
+        .unwrap();
+
+        let impostor = Address::from([0xFF; 20]);
+        let err = execute_submit_oracle_value(
+            &mut state,
+            &impostor,
+            &feed_id,
+            Amount::from_vtt(100),
+            1000,
+        )
+        .expect_err("unauthorized source must fail");
+        match err {
+            ExecutionError::Custom(msg) => assert!(msg.contains("authorized")),
+            _ => panic!("expected Custom error"),
+        }
     }
 
     #[test]

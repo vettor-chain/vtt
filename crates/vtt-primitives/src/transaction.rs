@@ -244,6 +244,32 @@ pub enum TransactionAction {
         address: Address,
         country: String,
     },
+
+    /// Register a new oracle feed. Callable only by the treasury / admin
+    /// address so creating a feed with trusted sources is gated.
+    CreateOracleFeed {
+        /// Unique feed identifier (any caller-chosen 32 bytes).
+        feed_id: H256,
+        /// Human-readable name.
+        name: String,
+        /// What this feed describes (stored as JSON to keep the Borsh schema
+        /// stable; executor validates the shape).
+        feed_type: String,
+        /// Authorized data sources (oracle node addresses).
+        authorized_sources: Vec<Address>,
+        /// Minimum sources required for an aggregated value (M-of-N).
+        quorum: u8,
+        /// Maximum staleness in milliseconds before a read is considered invalid.
+        max_staleness_ms: u64,
+    },
+
+    /// Submit a new value to an existing oracle feed. Sender must be one of
+    /// the feed's authorized sources. When the quorum is reached the feed's
+    /// latest aggregated value is updated (median of current submissions).
+    SubmitOracleValue {
+        feed_id: H256,
+        value: Amount,
+    },
 }
 
 /// Payload for cross-chain transfers.

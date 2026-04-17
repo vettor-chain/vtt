@@ -1351,6 +1351,22 @@ fn tx_to_info(
                 None,
                 None,
             ),
+            TransactionAction::CreateOracleFeed { .. } => (
+                "CreateOracleFeed".to_string(),
+                None,
+                Amount::ZERO,
+                None,
+                None,
+                None,
+            ),
+            TransactionAction::SubmitOracleValue { value, .. } => (
+                "SubmitOracleValue".to_string(),
+                None,
+                *value,
+                None,
+                None,
+                None,
+            ),
         };
 
     TransactionInfo {

@@ -586,6 +586,37 @@ impl StateDB {
         self.oracles.len()
     }
 
+    /// Submit an oracle value to an existing feed, persisting the updated
+    /// feed back to storage on success.
+    ///
+    /// Returns:
+    /// - `Ok(true)` if quorum was reached and the aggregated value was updated.
+    /// - `Ok(false)` if the submission was accepted but quorum not yet reached.
+    /// - `Err` if the feed does not exist or the sender is not authorized.
+    pub fn submit_oracle(
+        &mut self,
+        feed_id: &H256,
+        source: Address,
+        value: Amount,
+        timestamp: Timestamp,
+    ) -> Result<bool> {
+        let feed = self.oracles.get_mut(feed_id).ok_or_else(|| {
+            StateError::Serialization(format!("oracle feed not found: {feed_id}"))
+        })?;
+        if !feed.is_authorized(&source) {
+            return Err(StateError::Serialization(format!(
+                "address is not an authorized source for feed {feed_id}",
+            )));
+        }
+        let reached = feed.submit(source, value, timestamp);
+        if let Some(ref storage) = self.storage {
+            if let Ok(bytes) = borsh::to_vec(feed) {
+                let _ = storage.put(Column::Oracles, feed_id.as_bytes(), &bytes);
+            }
+        }
+        Ok(reached)
+    }
+
     // --- Contract Code Methods ---
 
     /// Store contract bytecode. Returns the code hash.
