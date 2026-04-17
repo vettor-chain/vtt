@@ -1499,6 +1499,27 @@ impl StateDB {
                 }
             }
         }
+        // Legacy-upgrade backfill: if the DB pre-dates the holder-count
+        // index (no `holders:<asset_id>` keys persisted) but already has
+        // ownership records, recompute the counter once from the loaded
+        // ownership map. Without this, `max_holders_per_asset` enforcement
+        // would read 0 for every asset on an upgraded validator.
+        if self.asset_holder_count.is_empty() && !self.ownership.is_empty() {
+            for ((asset_id, _), rec) in &self.ownership {
+                if !rec.total().is_zero() {
+                    *self.asset_holder_count.entry(*asset_id).or_insert(0) += 1;
+                }
+            }
+            for (id, count) in &self.asset_holder_count {
+                let mut k = b"holders:".to_vec();
+                k.extend_from_slice(id.as_bytes());
+                let _ = storage.put(Column::ChainMeta, &k, &count.to_le_bytes());
+            }
+            tracing::info!(
+                assets_backfilled = self.asset_holder_count.len(),
+                "backfilled asset_holder_count from legacy ownership records"
+            );
+        }
         // Contract code: key = code_hash (32 bytes).
         if let Ok(entries) = storage.prefix_scan(Column::ContractCode, b"") {
             for (key, value) in entries {
