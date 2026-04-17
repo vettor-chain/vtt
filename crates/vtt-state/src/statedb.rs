@@ -1169,6 +1169,105 @@ impl StateDB {
                 }
             }
         }
+        // Contract code: key = code_hash (32 bytes).
+        if let Ok(entries) = storage.prefix_scan(Column::ContractCode, b"") {
+            for (key, value) in entries {
+                if key.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&key);
+                    self.contract_code.insert(H256::from(arr), value);
+                }
+            }
+        }
+        // Contract storage: key = contract (20) || storage_key (any length).
+        if let Ok(entries) = storage.prefix_scan(Column::ContractStorage, b"") {
+            for (key, value) in entries {
+                if key.len() >= 20 {
+                    let mut contract_arr = [0u8; 20];
+                    contract_arr.copy_from_slice(&key[..20]);
+                    let storage_key = key[20..].to_vec();
+                    self.contract_storage
+                        .insert((Address::from(contract_arr), storage_key), value);
+                }
+            }
+        }
+
+        // Rebuild the Merkle trie from all warmed state so compute_state_root
+        // yields the same root the previous node computed. Without this the
+        // trie is empty post-restart and only reflects the blocks produced
+        // after the restart, causing state root divergence vs any node that
+        // has been continuously running.
+        self.rebuild_trie_from_cache();
+    }
+
+    /// Insert every cached state entry into the Merkle trie without marking
+    /// anything dirty. Must stay in lockstep with `compute_state_root` — the
+    /// same key schemes and same value encodings apply.
+    fn rebuild_trie_from_cache(&mut self) {
+        for (addr, acc) in &self.accounts {
+            if acc.is_empty() {
+                continue;
+            }
+            let key = addr.as_bytes().to_vec();
+            if let Ok(value) = borsh::to_vec(acc) {
+                self.trie.insert(key, value);
+            }
+        }
+        for (asset_id, asset) in &self.assets {
+            let mut key = b"asset:".to_vec();
+            key.extend_from_slice(asset_id.as_bytes());
+            if let Ok(value) = borsh::to_vec(asset) {
+                self.trie.insert(key, value);
+            }
+        }
+        for (pool_id, data) in &self.pools {
+            let mut key = b"pool:".to_vec();
+            key.extend_from_slice(pool_id.as_bytes());
+            self.trie.insert(key, data.clone());
+        }
+        for ((asset_id, owner), rec) in &self.ownership {
+            let mut key = b"own:".to_vec();
+            key.extend_from_slice(asset_id.as_bytes());
+            key.extend_from_slice(owner.as_bytes());
+            if let Ok(value) = borsh::to_vec(rec) {
+                self.trie.insert(key, value);
+            }
+        }
+        for (feed_id, feed) in &self.oracles {
+            let mut key = b"oracle:".to_vec();
+            key.extend_from_slice(feed_id.as_bytes());
+            if let Ok(value) = borsh::to_vec(feed) {
+                self.trie.insert(key, value);
+            }
+        }
+        for (pool_id, data) in &self.mining_states {
+            let mut key = b"mining:".to_vec();
+            key.extend_from_slice(pool_id.as_bytes());
+            self.trie.insert(key, data.clone());
+        }
+        for (code_hash, code) in &self.contract_code {
+            let mut key = b"code:".to_vec();
+            key.extend_from_slice(code_hash.as_bytes());
+            self.trie.insert(key, code.clone());
+        }
+        for ((contract, k), v) in &self.contract_storage {
+            let mut key = b"cs:".to_vec();
+            key.extend_from_slice(contract.as_bytes());
+            key.extend_from_slice(k);
+            self.trie.insert(key, v.clone());
+        }
+        for (proposal_id, proposal) in &self.asset_proposals {
+            let mut key = b"aprop:".to_vec();
+            key.extend_from_slice(proposal_id.as_bytes());
+            if let Ok(value) = borsh::to_vec(proposal) {
+                self.trie.insert(key, value);
+            }
+        }
+        for (proposal_id, data) in &self.governance_proposals {
+            let mut key = b"gprop:".to_vec();
+            key.extend_from_slice(proposal_id.as_bytes());
+            self.trie.insert(key, data.clone());
+        }
     }
 
     /// Attach a persistent storage backend to a StateDB that was created
@@ -1399,7 +1498,18 @@ impl StateDB {
             .unwrap_or(&[])
     }
 
-    /// Compute the state root by flushing dirty accounts and assets into the trie.
+    /// Compute the state root.
+    ///
+    /// Flushes every piece of state that contributes to consensus into the
+    /// Merkle trie: accounts, assets, ownership records, DEX pools and
+    /// mining state, contract code and storage, oracle feeds.
+    ///
+    /// Dirty-drain is used for the collections that have it (accounts,
+    /// assets, pools) — they track writes incrementally. The other
+    /// collections don't have dirty tracking yet, so we conservatively
+    /// flush the full HashMap. All collections must be covered here
+    /// otherwise restarted nodes whose trie was rebuilt from storage
+    /// would compute a different root than nodes with hot in-memory state.
     pub fn compute_state_root(&mut self) -> H256 {
         for addr in self.dirty.drain(..) {
             if let Some(account) = self.accounts.get(&addr) {
@@ -1429,6 +1539,57 @@ impl StateDB {
                 key.extend_from_slice(pool_id.as_bytes());
                 self.trie.insert(key, pool_data.clone());
             }
+        }
+
+        // Ownership records: key = "own:" || asset_id || owner
+        for ((asset_id, owner), rec) in &self.ownership {
+            let mut key = b"own:".to_vec();
+            key.extend_from_slice(asset_id.as_bytes());
+            key.extend_from_slice(owner.as_bytes());
+            if let Ok(value) = borsh::to_vec(rec) {
+                self.trie.insert(key, value);
+            }
+        }
+        // Oracle feeds: key = "oracle:" || feed_id
+        for (feed_id, feed) in &self.oracles {
+            let mut key = b"oracle:".to_vec();
+            key.extend_from_slice(feed_id.as_bytes());
+            if let Ok(value) = borsh::to_vec(feed) {
+                self.trie.insert(key, value);
+            }
+        }
+        // Mining state: key = "mining:" || pool_id
+        for (pool_id, data) in &self.mining_states {
+            let mut key = b"mining:".to_vec();
+            key.extend_from_slice(pool_id.as_bytes());
+            self.trie.insert(key, data.clone());
+        }
+        // Contract code: key = "code:" || code_hash
+        for (code_hash, code) in &self.contract_code {
+            let mut key = b"code:".to_vec();
+            key.extend_from_slice(code_hash.as_bytes());
+            self.trie.insert(key, code.clone());
+        }
+        // Contract storage: key = "cs:" || contract || k
+        for ((contract, k), v) in &self.contract_storage {
+            let mut key = b"cs:".to_vec();
+            key.extend_from_slice(contract.as_bytes());
+            key.extend_from_slice(k);
+            self.trie.insert(key, v.clone());
+        }
+        // Asset proposals: key = "aprop:" || proposal_id
+        for (proposal_id, proposal) in &self.asset_proposals {
+            let mut key = b"aprop:".to_vec();
+            key.extend_from_slice(proposal_id.as_bytes());
+            if let Ok(value) = borsh::to_vec(proposal) {
+                self.trie.insert(key, value);
+            }
+        }
+        // Governance proposals: key = "gprop:" || proposal_id
+        for (proposal_id, data) in &self.governance_proposals {
+            let mut key = b"gprop:".to_vec();
+            key.extend_from_slice(proposal_id.as_bytes());
+            self.trie.insert(key, data.clone());
         }
 
         self.trie.root()
@@ -1465,7 +1626,14 @@ impl StateDB {
         }
     }
 
-    /// Restore state from a snapshot.
+    /// Restore state from a snapshot, rolling back both the in-memory cache
+    /// and any persisted writes that occurred since the snapshot was taken.
+    ///
+    /// Because `put_*` writes are dual-path (cache + storage) and fire
+    /// immediately, a mid-tx failure would leave storage ahead of cache.
+    /// After the cache-level restore below we re-persist the entire
+    /// snapshot to storage so a subsequent restart reads the rolled-back
+    /// state, not the partially-mutated one.
     pub fn restore(&mut self, snapshot: StateSnapshot) {
         for addr in self.accounts.keys() {
             self.dirty.push(*addr);
@@ -1500,6 +1668,59 @@ impl StateDB {
         self.epoch_length = snapshot.epoch_length;
         self.dex_paused = snapshot.dex_paused;
         self.dirty_pools = snapshot.dirty_pools;
+
+        // Re-persist the restored cache so storage matches in-memory state.
+        // Without this, a mid-tx write that was rolled back would still be
+        // visible on restart (storage ahead of cache).
+        if let Some(storage) = self.storage.clone() {
+            for (addr, acc) in &self.accounts {
+                if let Ok(bytes) = borsh::to_vec(acc) {
+                    let _ = storage.put(Column::Accounts, addr.as_bytes(), &bytes);
+                }
+            }
+            for (id, asset) in &self.assets {
+                if let Ok(bytes) = borsh::to_vec(asset) {
+                    let _ = storage.put(Column::Assets, id.as_bytes(), &bytes);
+                }
+            }
+            for ((asset_id, owner), rec) in &self.ownership {
+                if let Ok(bytes) = borsh::to_vec(rec) {
+                    let mut key = Vec::with_capacity(52);
+                    key.extend_from_slice(asset_id.as_bytes());
+                    key.extend_from_slice(owner.as_bytes());
+                    let _ = storage.put(Column::Ownership, &key, &bytes);
+                }
+            }
+            for (feed_id, feed) in &self.oracles {
+                if let Ok(bytes) = borsh::to_vec(feed) {
+                    let _ = storage.put(Column::Oracles, feed_id.as_bytes(), &bytes);
+                }
+            }
+            for (code_hash, code) in &self.contract_code {
+                let _ = storage.put(Column::ContractCode, code_hash.as_bytes(), code);
+            }
+            for ((contract, k), v) in &self.contract_storage {
+                let mut key = Vec::with_capacity(20 + k.len());
+                key.extend_from_slice(contract.as_bytes());
+                key.extend_from_slice(k);
+                let _ = storage.put(Column::ContractStorage, &key, v);
+            }
+            for (pool_id, data) in &self.pools {
+                let _ = storage.put(Column::Pools, pool_id.as_bytes(), data);
+            }
+            for (pool_id, data) in &self.mining_states {
+                let _ = storage.put(Column::MiningStates, pool_id.as_bytes(), data);
+            }
+            for (id, proposal) in &self.asset_proposals {
+                if let Ok(bytes) = borsh::to_vec(proposal) {
+                    let _ = storage.put(Column::AssetProposals, id.as_bytes(), &bytes);
+                }
+            }
+            for (id, data) in &self.governance_proposals {
+                let key = [b"gov:", id.as_bytes().as_slice()].concat();
+                let _ = storage.put(Column::ChainMeta, &key, data);
+            }
+        }
     }
 }
 

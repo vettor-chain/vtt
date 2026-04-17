@@ -182,9 +182,24 @@ impl Chain {
         }
 
         self.head_hash = Some(head_hash);
-        if let Some(head) = self.headers.get(&head_hash) {
+        if let Some(head) = self.headers.get(&head_hash).cloned() {
             let epoch = self.consensus.epoch_for_block(head.number);
             self.validator_set = self.consensus.elect_validators(&self.state, epoch);
+
+            // Sanity-check that the rebuilt state matches the head block's
+            // state_root. A mismatch indicates corrupted RocksDB data or a
+            // schema drift — producing blocks from here would yield invalid
+            // state roots that other nodes reject.
+            let computed = self.state.compute_state_root();
+            if computed != head.state_root {
+                tracing::warn!(
+                    head_number = head.number,
+                    expected = ?head.state_root,
+                    computed = ?computed,
+                    "state_root mismatch after resume — storage may be corrupted or schema changed"
+                );
+            }
+
             info!(
                 head_number = head.number,
                 headers_loaded = self.headers.len(),
