@@ -115,7 +115,13 @@ fn cmd_genesis(args: &[String]) {
 fn cmd_keygen(args: &[String]) {
     let keypair = if args.len() >= 2 && args[0] == "--seed" {
         let seed_hex = &args[1];
-        let seed_bytes = hex::decode(seed_hex).expect("invalid hex seed");
+        let seed_bytes = match hex::decode(seed_hex) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Error: invalid hex seed: {e}");
+                std::process::exit(1);
+            }
+        };
         if seed_bytes.len() != 32 {
             eprintln!("Error: seed must be exactly 32 bytes (64 hex chars)");
             std::process::exit(1);
