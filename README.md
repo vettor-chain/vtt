@@ -16,6 +16,7 @@ Layer 1 blockchain for tokenizing real-world assets. Built in Rust with DPoS con
 - **Built-in DEX** -- Constant product AMM, multi-pool, LP tokens, auto-liquidity
 - **Cross-chain Bridge** -- Custodial bridge to Ethereum and Base, wVTT (ERC-20)
 - **On-chain Governance** -- Proposal system with 7-day voting, 33% quorum, 24h execution timelock, whitelisted `ParameterChange` keys
+- **Multichain Registry** -- Governance-managed registry of app-chains (relay + future parachains). RegisterChain proposal persists a RegisteredChain record; cross-chain message routing is scaffolded but not yet live — CrossChainTransfer transactions are rejected explicitly until a relayer ships
 - **RWA Tokenization** -- Fractional ownership, revenue distribution, asset governance, RedemptionPending lifecycle
 - **Compliance** -- On-chain KYC flag, per-address jurisdiction, chain-wide whitelist/blacklist, `max_holders_per_asset` cap
 - **Oracles** -- Treasury-gated feed registration, M-of-N authorised sources with median quorum aggregation
@@ -130,6 +131,8 @@ The validator exposes a JSON-RPC 2.0 API on port 9944. Key methods:
 | `vtt_getBridgeRelayer` | Address authorised to submit BridgeDeposit |
 | `vtt_getSlashingHistory` | Slashing events recorded for a validator |
 | `vtt_getTransactionReceipt` | Receipt (logs, gas used) for a tx hash |
+| `vtt_listRegisteredChains` | List app-chains registered via governance |
+| `vtt_getRegisteredChain` | Lookup a registered app-chain by chain_id |
 
 Full API documentation: [docs](https://testnet.vettor.org/docs)
 
