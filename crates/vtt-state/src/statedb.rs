@@ -1096,11 +1096,19 @@ impl StateDB {
 
     /// Check whether a bridge deposit with this source tx hash has already
     /// been credited on this chain. Prevents replay of relayer-submitted deposits.
-    pub fn bridge_deposit_processed(&self, source_tx_hash: &H256) -> bool {
+    pub fn bridge_deposit_processed(&self, source_chain: u32, source_tx_hash: &H256) -> bool {
         if let Some(ref storage) = self.storage {
-            let mut key = b"bridge:deposit:".to_vec();
-            key.extend_from_slice(source_tx_hash.as_bytes());
+            let key = bridge_deposit_key(source_chain, source_tx_hash);
             if let Ok(Some(_)) = storage.get(Column::ChainMeta, &key) {
+                return true;
+            }
+            // Legacy key (pre-source_chain-scoped). Keeps old-format marks
+            // valid after an upgrade: a deposit marked with the old key still
+            // blocks a replay with the same (chain, hash) pair. The normal
+            // write path only emits the new keyspace going forward.
+            let mut legacy = b"bridge:deposit:".to_vec();
+            legacy.extend_from_slice(source_tx_hash.as_bytes());
+            if let Ok(Some(_)) = storage.get(Column::ChainMeta, &legacy) {
                 return true;
             }
         }
@@ -1108,10 +1116,9 @@ impl StateDB {
     }
 
     /// Mark a bridge deposit as processed (call after successful credit).
-    pub fn mark_bridge_deposit_processed(&mut self, source_tx_hash: &H256) {
+    pub fn mark_bridge_deposit_processed(&mut self, source_chain: u32, source_tx_hash: &H256) {
         if let Some(ref storage) = self.storage {
-            let mut key = b"bridge:deposit:".to_vec();
-            key.extend_from_slice(source_tx_hash.as_bytes());
+            let key = bridge_deposit_key(source_chain, source_tx_hash);
             let _ = storage.put(Column::ChainMeta, &key, &[1u8]);
         }
     }
@@ -1990,6 +1997,9 @@ impl StateDB {
             dex_paused: self.dex_paused,
             dirty_pools: self.dirty_pools.clone(),
             asset_holder_count: self.asset_holder_count.clone(),
+            slashing_seen: self.slashing_seen.clone(),
+            kyc_approved: self.kyc_approved.clone(),
+            stakers: self.stakers.clone(),
         }
     }
 
@@ -2036,6 +2046,9 @@ impl StateDB {
         self.dex_paused = snapshot.dex_paused;
         self.dirty_pools = snapshot.dirty_pools;
         self.asset_holder_count = snapshot.asset_holder_count;
+        self.slashing_seen = snapshot.slashing_seen;
+        self.kyc_approved = snapshot.kyc_approved;
+        self.stakers = snapshot.stakers;
 
         // Re-persist the restored cache so storage matches in-memory state.
         // Without this, a mid-tx write that was rolled back would still be
@@ -2094,6 +2107,16 @@ impl StateDB {
                 let _ = storage.put(Column::ChainMeta, &key, &count.to_le_bytes());
             }
         }
+        // Re-persist the three side-channel caches after the cache-level
+        // rollback so their on-disk blobs match the restored in-memory set.
+        self.persist_slashing_seen();
+        self.persist_stakers();
+        if let Some(ref storage) = self.storage {
+            let items: Vec<Address> = self.kyc_approved.iter().copied().collect();
+            if let Ok(bytes) = borsh::to_vec(&items) {
+                let _ = storage.put(Column::ChainMeta, b"kyc:approved", &bytes);
+            }
+        }
     }
 }
 
@@ -2101,6 +2124,17 @@ impl Default for StateDB {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build the ChainMeta key used for bridge-deposit replay protection.
+/// Scoped by (source_chain, source_tx_hash) so a collision on just the hash
+/// between different source chains doesn't poison the replay set.
+fn bridge_deposit_key(source_chain: u32, source_tx_hash: &H256) -> Vec<u8> {
+    let mut key = Vec::with_capacity(16 + 4 + 32);
+    key.extend_from_slice(b"bridge:deposit:v2:");
+    key.extend_from_slice(&source_chain.to_le_bytes());
+    key.extend_from_slice(source_tx_hash.as_bytes());
+    key
 }
 
 /// Parse a comma-separated list of country codes into an uppercased Vec<String>.
@@ -2138,6 +2172,12 @@ pub struct StateSnapshot {
     dex_paused: bool,
     dirty_pools: Vec<H256>,
     asset_holder_count: HashMap<H256, u32>,
+    // Side-channel caches that executor actions can mutate: include in the
+    // snapshot so a mid-tx rollback can't leave them drifted relative to
+    // the primary `accounts` / `assets` state.
+    slashing_seen: HashSet<(Address, u64, u32)>,
+    kyc_approved: HashSet<Address>,
+    stakers: HashSet<Address>,
 }
 
 #[cfg(test)]

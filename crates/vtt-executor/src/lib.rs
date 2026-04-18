@@ -1011,7 +1011,7 @@ fn execute_bridge_deposit(
     state: &mut StateDB,
     sender: &Address,
     source_tx_hash: &H256,
-    _source_chain: u32,
+    source_chain: u32,
     recipient: &Address,
     token: &H256,
     amount: Amount,
@@ -1035,7 +1035,7 @@ fn execute_bridge_deposit(
     }
 
     // 3. Replay protection
-    if state.bridge_deposit_processed(source_tx_hash) {
+    if state.bridge_deposit_processed(source_chain, source_tx_hash) {
         return Err(ExecutionError::Custom(
             "bridge deposit already processed".into(),
         ));
@@ -1065,7 +1065,7 @@ fn execute_bridge_deposit(
         state.put_ownership(ownership);
     }
 
-    state.mark_bridge_deposit_processed(source_tx_hash);
+    state.mark_bridge_deposit_processed(source_chain, source_tx_hash);
 
     Ok(vec![Log {
         address: *sender,
@@ -2393,6 +2393,14 @@ pub fn process_slashing_evidence(
             continue;
         }
         let offender = ev.offender();
+        // Dedup by (offender, epoch, slot) so a validator can't be slashed
+        // twice for the same evidence via the in-block auto-detect path and
+        // a follow-up SubmitSlashingEvidence transaction.
+        let ev_epoch = ev.header_a.epoch;
+        let ev_slot = ev.header_a.slot;
+        if state.slashing_evidence_seen(&offender, ev_epoch, ev_slot) {
+            continue;
+        }
         let account = state.get_account(&offender);
         let total_stake = account
             .staking
@@ -2408,6 +2416,7 @@ pub fn process_slashing_evidence(
         let actual = state.apply_slash(&offender, slash_amount);
         if !actual.is_zero() {
             state.record_slash(&offender, current_epoch, "double_sign", actual);
+            state.mark_slashing_evidence(offender, ev_epoch, ev_slot);
             slashed.push((offender, actual));
         }
     }
