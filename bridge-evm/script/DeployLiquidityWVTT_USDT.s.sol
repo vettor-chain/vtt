@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Script.sol";
-import "../src/WVTT.sol";
-import "forge-std/interfaces/IERC20.sol";
+import { Script, console } from "forge-std/Script.sol";
+import { WVTT } from "../src/WVTT.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
 
 /**
  * @title Deploy wVTT/USDT Liquidity on Uniswap V2
@@ -56,7 +56,6 @@ contract DeployLiquidityWVTT_USDT is Script {
         require(usdtAmount > 0, "INITIAL_USDT_AMOUNT must be > 0");
 
         WVTT wvtt = WVTT(wvttAddr);
-        IERC20 usdt = IERC20(usdtAddr);
         IUniswapV2Router02 router = IUniswapV2Router02(routerAddr);
 
         vm.startBroadcast();

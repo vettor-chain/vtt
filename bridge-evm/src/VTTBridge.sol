@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./WVTT.sol";
-import "forge-std/interfaces/IERC20.sol";
+import { WVTT } from "./WVTT.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
 
 /**
  * @title VTT Bridge
@@ -71,18 +71,30 @@ contract VTTBridge {
     event TimelockExecuted(bytes32 indexed actionHash);
 
     modifier onlyRelayer() {
-        require(msg.sender == relayer, "Bridge: not relayer");
+        _onlyRelayer();
         _;
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Bridge: not owner");
+        _onlyOwner();
         _;
     }
 
     modifier whenNotPaused() {
-        require(!paused, "Bridge: paused");
+        _whenNotPaused();
         _;
+    }
+
+    function _onlyRelayer() internal view {
+        require(msg.sender == relayer, "Bridge: not relayer");
+    }
+
+    function _onlyOwner() internal view {
+        require(msg.sender == owner, "Bridge: not owner");
+    }
+
+    function _whenNotPaused() internal view {
+        require(!paused, "Bridge: paused");
     }
 
     function pause() external onlyOwner {
@@ -185,7 +197,10 @@ contract VTTBridge {
 
     function queueSetRelayer(address _relayer) external onlyOwner {
         bytes32 hash = keccak256(abi.encode("setRelayer", _relayer));
-        timelockActions[hash] = TimelockAction(block.timestamp + TIMELOCK_DELAY, false);
+        timelockActions[hash] = TimelockAction({
+            executeAfter: block.timestamp + TIMELOCK_DELAY,
+            executed: false
+        });
         emit TimelockQueued(hash, block.timestamp + TIMELOCK_DELAY);
     }
 

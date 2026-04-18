@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Test.sol";
-import "../src/WVTT.sol";
-import "../src/VTTBridge.sol";
-import "forge-std/interfaces/IERC20.sol";
+import { Test } from "forge-std/Test.sol";
+import { WVTT } from "../src/WVTT.sol";
+import { VTTBridge } from "../src/VTTBridge.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
 
 // Mock USDT for testing
 contract MockUSDT is IERC20 {
@@ -78,7 +78,7 @@ contract BridgeTest is Test {
         wvtt.mint(user, 100 ether);
 
         vm.prank(user);
-        wvtt.transfer(address(0xBBBB), 40 ether);
+        assertTrue(wvtt.transfer(address(0xBBBB), 40 ether));
 
         assertEq(wvtt.balanceOf(user), 60 ether);
         assertEq(wvtt.balanceOf(address(0xBBBB)), 40 ether);

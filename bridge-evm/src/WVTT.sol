@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/interfaces/IERC20.sol";
+import { IERC20 } from "forge-std/interfaces/IERC20.sol";
 
 /**
  * @title Wrapped VTT (wVTT)
@@ -24,13 +24,21 @@ contract WVTT is IERC20 {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     modifier onlyBridge() {
-        require(msg.sender == bridge, "WVTT: caller is not the bridge");
+        _onlyBridge();
         _;
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "WVTT: caller is not the owner");
+        _onlyOwner();
         _;
+    }
+
+    function _onlyBridge() internal view {
+        require(msg.sender == bridge, "WVTT: caller is not the bridge");
+    }
+
+    function _onlyOwner() internal view {
+        require(msg.sender == owner, "WVTT: caller is not the owner");
     }
 
     constructor(address _bridge) {

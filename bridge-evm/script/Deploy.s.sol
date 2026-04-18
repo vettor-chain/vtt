@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "forge-std/Script.sol";
-import "../src/WVTT.sol";
-import "../src/VTTBridge.sol";
+import { Script, console } from "forge-std/Script.sol";
+import { WVTT } from "../src/WVTT.sol";
+import { VTTBridge } from "../src/VTTBridge.sol";
 
 contract DeployBridge is Script {
     function run() external {
