@@ -418,36 +418,19 @@ fn execute_action(
 
         TransactionAction::CrossChainTransfer {
             destination_chain,
-            to,
-            payload,
+            to: _to,
+            payload: _payload,
         } => {
-            // Lock assets on source chain based on payload
-            match payload {
-                vtt_primitives::transaction::CrossChainPayload::VttTransfer { amount } => {
-                    // Lock VTT by deducting from sender
-                    state.sub_balance(sender, *amount)?;
-                }
-                vtt_primitives::transaction::CrossChainPayload::AssetTransfer {
-                    asset_id,
-                    amount,
-                } => {
-                    // Lock asset tokens by deducting from sender
-                    state.transfer_asset(asset_id, sender, &Address::ZERO, *amount)?;
-                }
-                vtt_primitives::transaction::CrossChainPayload::ContractCall { value, .. } => {
-                    if !value.is_zero() {
-                        state.sub_balance(sender, *value)?;
-                    }
-                }
-            }
-            Ok(vec![Log {
-                address: *sender,
-                topics: vec![
-                    blake3_hash(b"CrossChainTransfer"),
-                    blake3_hash(&borsh::to_vec(destination_chain).unwrap()),
-                ],
-                data: borsh::to_vec(&(*sender, *to, payload)).unwrap(),
-            }])
+            // Cross-chain routing is not yet live: the chain registry exists
+            // (registered chains are visible via vtt_listRegisteredChains)
+            // but no relayer moves messages from outbox to inbox. Rather
+            // than silently locking funds in an outbox that never drains —
+            // which would be a money-loss bug for any user who tried it —
+            // reject the transaction with a clear error. The tx-level
+            // snapshot/rollback guarantees no state mutation persists.
+            Err(ExecutionError::Custom(format!(
+                "cross-chain routing to {destination_chain} is not yet live; the app-chain is registered but the relayer is not active",
+            )))
         }
 
         TransactionAction::CreatePool {
@@ -2359,8 +2342,21 @@ pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 
                     }
                 }
             }
-            ProposalAction::RegisterChain { name, .. } => {
-                debug!(?proposal_id, name, "chain registration signal executed");
+            ProposalAction::RegisterChain { name, config_json } => {
+                match register_app_chain(state, name, config_json, &proposal, current_block) {
+                    Ok(chain_id) => {
+                        tracing::info!(
+                            ?proposal_id,
+                            name,
+                            %chain_id,
+                            event = "AppChainRegistered",
+                            "app chain registered"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(?proposal_id, name, error = %e, "RegisterChain failed");
+                    }
+                }
             }
             ProposalAction::ProtocolUpgrade {
                 version,
@@ -2465,6 +2461,99 @@ fn parse_address(s: &str) -> Option<Address> {
 /// Whitelist of governance-controlled protocol parameters and their acceptable
 /// value formats. Called at proposal creation time so unknown keys or malformed
 /// values never reach the execution path.
+/// Parse a `RegisterChain` proposal and persist the resulting
+/// `RegisteredChain` blob in state. Returns the allocated chain_id.
+///
+/// `config_json` is expected to be a small JSON object:
+/// ```json
+/// {
+///   "description": "...",
+///   "validator_count": 11,
+///   "compliance": "permissioned" | "permissionless",
+///   "trusted_issuers": ["0x...", ...]
+/// }
+/// ```
+/// Missing fields get sensible defaults. The consensus and gas configs
+/// are inherited from the relay's defaults — a future governance action
+/// can tune them per-chain once multichain routing is live.
+fn register_app_chain(
+    state: &mut StateDB,
+    name: &str,
+    config_json: &str,
+    proposal: &vtt_consensus::governance::Proposal,
+    current_block: u64,
+) -> std::result::Result<vtt_primitives::ChainId, String> {
+    use vtt_compliance::ChainComplianceConfig;
+    use vtt_multichain::RegisteredChain;
+    use vtt_primitives::chain::{ConsensusParams, GasConfig};
+    use vtt_primitives::ChainId;
+
+    #[derive(serde::Deserialize, Default)]
+    struct Config {
+        #[serde(default)]
+        description: String,
+        #[serde(default = "default_validator_count")]
+        validator_count: u32,
+        #[serde(default)]
+        compliance: String,
+        #[serde(default)]
+        trusted_issuers: Vec<String>,
+    }
+    fn default_validator_count() -> u32 {
+        11
+    }
+
+    let cfg: Config =
+        serde_json::from_str(config_json).map_err(|e| format!("invalid config_json: {e}"))?;
+
+    if cfg.validator_count == 0 {
+        return Err("validator_count must be > 0".into());
+    }
+
+    let compliance = match cfg.compliance.to_ascii_lowercase().as_str() {
+        "" | "permissionless" => ChainComplianceConfig::permissionless(),
+        "permissioned" => {
+            let issuers: Vec<H256> = cfg
+                .trusted_issuers
+                .iter()
+                .filter_map(|s| {
+                    let trimmed = s.trim().trim_start_matches("0x");
+                    if trimmed.len() != 64 {
+                        return None;
+                    }
+                    let mut bytes = [0u8; 32];
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        *b = u8::from_str_radix(&trimmed[i * 2..i * 2 + 2], 16).ok()?;
+                    }
+                    Some(H256::from(bytes))
+                })
+                .collect();
+            ChainComplianceConfig::permissioned(issuers)
+        }
+        other => return Err(format!("unknown compliance mode '{other}'")),
+    };
+
+    let chain_id_raw = state.next_registered_chain_id();
+    let chain_id = ChainId::new(chain_id_raw);
+
+    let record = RegisteredChain {
+        chain_id,
+        name: name.to_string(),
+        description: cfg.description,
+        validator_count: cfg.validator_count,
+        consensus: ConsensusParams::default(),
+        gas: GasConfig::default(),
+        compliance,
+        genesis_hash: H256::ZERO,
+        active: true,
+        registered_at: current_block,
+        proposer: proposal.proposer,
+    };
+    let bytes = borsh::to_vec(&record).map_err(|e| format!("encode failed: {e}"))?;
+    state.put_registered_chain(chain_id_raw, &bytes);
+    Ok(chain_id)
+}
+
 fn validate_parameter_change(key: &str, value: &str) -> Result<(), ExecutionError> {
     match key {
         "bridge_relayer" | "treasury_address" => {

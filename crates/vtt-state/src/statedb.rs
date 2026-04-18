@@ -911,6 +911,76 @@ impl StateDB {
         }
     }
 
+    // --- Multichain registry (read-side; routing is not yet live) ---
+    //
+    // App-chains registered via a governance `RegisterChain` proposal are
+    // stored here as borsh-encoded blobs. The state module deliberately
+    // does not depend on `vtt-multichain` — callers decode the blob into
+    // the concrete type. A parallel `chain:registered:next_id` counter
+    // allocates new chain_ids. Cross-chain message routing is not yet
+    // wired, so at this level the registry is informational only.
+
+    /// Persist a registered chain record (borsh-encoded `RegisteredChain`).
+    pub fn put_registered_chain(&self, chain_id: u32, bytes: &[u8]) {
+        if let Some(ref storage) = self.storage {
+            let mut key = b"chain:registered:".to_vec();
+            key.extend_from_slice(&chain_id.to_le_bytes());
+            let _ = storage.put(Column::ChainMeta, &key, bytes);
+        }
+    }
+
+    /// Read a registered chain record, if any.
+    pub fn get_registered_chain(&self, chain_id: u32) -> Option<Vec<u8>> {
+        let storage = self.storage.as_ref()?;
+        let mut key = b"chain:registered:".to_vec();
+        key.extend_from_slice(&chain_id.to_le_bytes());
+        storage.get(Column::ChainMeta, &key).ok().flatten()
+    }
+
+    /// Iterate every registered chain record as (chain_id, encoded bytes).
+    pub fn iter_registered_chains(&self) -> Vec<(u32, Vec<u8>)> {
+        let Some(ref storage) = self.storage else {
+            return Vec::new();
+        };
+        let prefix = b"chain:registered:".to_vec();
+        let Ok(entries) = storage.prefix_scan(Column::ChainMeta, &prefix) else {
+            return Vec::new();
+        };
+        entries
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let suffix = k.strip_prefix(prefix.as_slice())?;
+                if suffix.len() != 4 {
+                    return None;
+                }
+                let mut id_bytes = [0u8; 4];
+                id_bytes.copy_from_slice(suffix);
+                Some((u32::from_le_bytes(id_bytes), v))
+            })
+            .collect()
+    }
+
+    /// Allocate the next chain_id for a RegisterChain proposal. Starts at
+    /// 1 because 0 is reserved for the relay.
+    pub fn next_registered_chain_id(&mut self) -> u32 {
+        let key = b"chain:registered:next_id";
+        let current = self
+            .storage
+            .as_ref()
+            .and_then(|s| s.get(Column::ChainMeta, key).ok().flatten())
+            .filter(|b| b.len() == 4)
+            .map(|b| {
+                let mut a = [0u8; 4];
+                a.copy_from_slice(&b);
+                u32::from_le_bytes(a)
+            })
+            .unwrap_or(1);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(Column::ChainMeta, key, &(current + 1).to_le_bytes());
+        }
+        current
+    }
+
     /// Get a governance-set protocol parameter override (raw bytes).
     /// Returns `None` if not set, in which case consumers fall back to the
     /// consensus / gas defaults baked into `ChainConfig`.

@@ -164,6 +164,27 @@ pub struct SlashRecordInfo {
     pub amount: Amount,
 }
 
+/// RPC response for a registered app-chain. Routing between chains is not
+/// yet live; this endpoint is informational.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisteredChainInfo {
+    pub chain_id: u32,
+    pub name: String,
+    pub description: String,
+    pub validator_count: u32,
+    /// "permissionless" or "permissioned"
+    pub compliance_mode: String,
+    /// Whether the chain record is active (not deactivated).
+    pub active: bool,
+    /// Block number when the RegisterChain proposal executed.
+    pub registered_at: u64,
+    /// Governance proposer that originated the registration.
+    pub proposer: Address,
+    /// Whether cross-chain messages to this chain are routable today.
+    /// Always `false` until a relayer is wired up.
+    pub routable: bool,
+}
+
 /// RPC response for asset balance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetBalanceInfo {

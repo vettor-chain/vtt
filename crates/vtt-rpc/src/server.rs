@@ -122,7 +122,8 @@ use crate::types::{
     AccountInfo, AssetBalanceInfo, AssetInfo, AssetProposalInfo, BlockInfo, BridgeWithdrawalInfo,
     ChainStatus, ConsensusParamsRpc, DelegationInfo, GasConfigRpc, LogInfo, NodeMetricsInfo,
     OracleFeedInfo, PaginatedResult, PoolInfo, PoolPriceRpc, ProposalInfo, ReceiptInfo,
-    SlashRecordInfo, StakingInfo, SwapQuoteRpc, TokenPriceRpc, TransactionInfo, ValidatorInfoRpc,
+    RegisteredChainInfo, SlashRecordInfo, StakingInfo, SwapQuoteRpc, TokenPriceRpc,
+    TransactionInfo, ValidatorInfoRpc,
 };
 
 /// JSON-RPC API definition for VTT.
@@ -327,6 +328,18 @@ pub trait VttApi {
         &self,
         validator: Address,
     ) -> Result<Vec<SlashRecordInfo>, ErrorObjectOwned>;
+
+    /// List every app-chain registered via governance. Relay chain is not
+    /// included (it is implicit and always active).
+    #[method(name = "vtt_listRegisteredChains")]
+    async fn list_registered_chains(&self) -> Result<Vec<RegisteredChainInfo>, ErrorObjectOwned>;
+
+    /// Look up a single registered app-chain by id.
+    #[method(name = "vtt_getRegisteredChain")]
+    async fn get_registered_chain(
+        &self,
+        chain_id: u32,
+    ) -> Result<Option<RegisteredChainInfo>, ErrorObjectOwned>;
 }
 
 /// Per-IP rate limiter for sendTransaction -- sliding window counter.
@@ -1168,6 +1181,52 @@ impl VttApiServer for VttRpcImpl {
             })
             .collect())
     }
+
+    async fn list_registered_chains(&self) -> Result<Vec<RegisteredChainInfo>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        let mut out = Vec::new();
+        for (chain_id, bytes) in chain.state().iter_registered_chains() {
+            if let Some(info) = decode_registered_chain(chain_id, &bytes) {
+                out.push(info);
+            }
+        }
+        out.sort_by_key(|c| c.chain_id);
+        Ok(out)
+    }
+
+    async fn get_registered_chain(
+        &self,
+        chain_id: u32,
+    ) -> Result<Option<RegisteredChainInfo>, ErrorObjectOwned> {
+        let chain = read_chain(&self.state.chain)?;
+        Ok(chain
+            .state()
+            .get_registered_chain(chain_id)
+            .and_then(|b| decode_registered_chain(chain_id, &b)))
+    }
+}
+
+fn decode_registered_chain(chain_id: u32, bytes: &[u8]) -> Option<RegisteredChainInfo> {
+    use vtt_multichain::RegisteredChain;
+    let record: RegisteredChain = borsh::from_slice(bytes).ok()?;
+    let compliance_mode = if record.compliance.requires_identity {
+        "permissioned".to_string()
+    } else {
+        "permissionless".to_string()
+    };
+    Some(RegisteredChainInfo {
+        chain_id,
+        name: record.name,
+        description: record.description,
+        validator_count: record.validator_count,
+        compliance_mode,
+        active: record.active,
+        registered_at: record.registered_at,
+        proposer: record.proposer,
+        // Routing stays `false` until a relayer is wired up — this flag is
+        // what the UI / clients check before building CrossChainTransfer.
+        routable: false,
+    })
 }
 
 /// Convert an internal AssetRecord to the RPC-facing AssetInfo, including

@@ -4831,11 +4831,15 @@ name = "vtt-executor"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "vtt-compliance",
  "vtt-consensus",
  "vtt-crypto",
  "vtt-dex",
+ "vtt-multichain",
  "vtt-primitives",
  "vtt-state",
  "vtt-storage",
@@ -4970,6 +4974,7 @@ dependencies = [
  "vtt-crypto",
  "vtt-dex",
  "vtt-genesis",
+ "vtt-multichain",
  "vtt-primitives",
  "vtt-state",
  "vtt-telemetry",
