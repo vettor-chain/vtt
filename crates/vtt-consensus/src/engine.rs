@@ -168,6 +168,27 @@ impl ConsensusEngine {
             });
         }
 
+        // 4b. Check the self-declared epoch/slot match what the block number
+        // would produce. A producer lying about these skews double-sign
+        // detection (commitments are keyed by (validator, epoch, slot)) and
+        // makes the block headers inconsistent with derived quantities used
+        // elsewhere. The real producer check above uses block.number, so a
+        // mismatch here can only be a deliberate annotation error.
+        let expected_epoch = self.epoch_for_block(header.number);
+        let expected_slot = self.slot_for_block(header.number);
+        if header.epoch != expected_epoch {
+            return Err(ConsensusError::WrongBlockNumber {
+                expected: expected_epoch,
+                got: header.epoch,
+            });
+        }
+        if header.slot != expected_slot {
+            return Err(ConsensusError::WrongBlockNumber {
+                expected: expected_slot as u64,
+                got: header.slot as u64,
+            });
+        }
+
         // 5. Verify signature (if validator has a public key registered)
         if let Some(ref pubkey) = expected_producer.public_key {
             let signable = header.signable_bytes();

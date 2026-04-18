@@ -1257,6 +1257,7 @@ fn execute_unstake(
         vtt_state::account::UnbondingEntry {
             amount,
             completion_time,
+            validator: *validator,
         },
     );
 
@@ -2220,11 +2221,17 @@ pub fn finalize_governance_proposals(
 ) -> u64 {
     use vtt_consensus::governance::{ProposalStatus, EXECUTION_DELAY_BLOCKS};
 
-    // Collect all proposal IDs and their raw bytes first (to avoid borrow issues)
-    let proposals_raw: Vec<(H256, Vec<u8>)> = state
+    // Collect all proposal IDs and their raw bytes first (to avoid borrow
+    // issues). Sorted by id so iteration order is deterministic across
+    // nodes — HashMap order otherwise differs between replicas and would
+    // cause consensus drift when multiple proposals mutate the same
+    // state (e.g. a ParameterChange that rotates treasury_address followed
+    // by a TreasurySpend in the same finalisation pass).
+    let mut proposals_raw: Vec<(H256, Vec<u8>)> = state
         .iter_governance_proposals()
         .map(|(id, data)| (*id, data.clone()))
         .collect();
+    proposals_raw.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
     let mut finalized_count = 0u64;
 
@@ -2289,10 +2296,12 @@ pub fn finalize_governance_proposals(
 pub fn execute_queued_proposals(state: &mut StateDB, current_block: u64) -> u64 {
     use vtt_consensus::governance::{ProposalAction, ProposalStatus};
 
-    let proposals_raw: Vec<(H256, Vec<u8>)> = state
+    // Sort by id so execution order is deterministic across replicas.
+    let mut proposals_raw: Vec<(H256, Vec<u8>)> = state
         .iter_governance_proposals()
         .map(|(id, data)| (*id, data.clone()))
         .collect();
+    proposals_raw.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
 
     let mut executed_count = 0u64;
 

@@ -1170,24 +1170,71 @@ impl StateDB {
             None => return Amount::ZERO,
         };
 
-        // Cap slash to total_stake
-        let slash = if amount > staking.total_stake {
-            staking.total_stake
-        } else {
-            amount
-        };
+        // Also slash pending unbonding entries aimed at this validator. Sum
+        // their amount so the overall slash fraction applies to
+        // (total_stake + pending_unbonding) — a validator can't escape a
+        // slash by unstaking just before it lands. Slash ratio is the
+        // caller's requested `amount` over `(total_stake + pending)`; we
+        // cap at the combined pool so the final slash can't exceed what
+        // actually exists on-chain.
+        let pending: u128 = self
+            .unbonding_entries
+            .values()
+            .flat_map(|entries| entries.iter())
+            .filter(|e| e.validator == *validator)
+            .map(|e| e.amount.raw())
+            .sum();
+        let combined = staking.total_stake.raw().saturating_add(pending);
+        if combined == 0 {
+            return Amount::ZERO;
+        }
+        let requested = amount.raw().min(combined);
 
-        // Reduce self_stake first, overflow goes to delegations proportionally
-        let from_self = if slash > staking.self_stake {
+        // Slash the in-stake portion first.
+        let total_stake_raw = staking.total_stake.raw();
+        let slash_stake_raw = requested.min(total_stake_raw);
+        let slash_stake = Amount::from_raw(slash_stake_raw);
+
+        let from_self = if slash_stake > staking.self_stake {
             staking.self_stake
         } else {
-            slash
+            slash_stake
         };
         staking.self_stake = staking.self_stake - from_self;
-        staking.total_stake = staking.total_stake - slash;
-
+        staking.total_stake = staking.total_stake - slash_stake;
         self.put_account(*validator, account);
-        slash
+
+        // Then reduce pending unbonding entries pro-rata. The remaining
+        // slash that didn't fit inside total_stake (because pending > 0
+        // and the caller asked for more than the stake) is distributed
+        // across matching entries in proportion to their amount.
+        let slash_unbonding = requested.saturating_sub(slash_stake_raw);
+        if slash_unbonding > 0 && pending > 0 {
+            let mut changed = false;
+            for entries in self.unbonding_entries.values_mut() {
+                for entry in entries.iter_mut() {
+                    if entry.validator != *validator {
+                        continue;
+                    }
+                    // entry_slash = slash_unbonding * entry.amount / pending
+                    let entry_raw = entry.amount.raw();
+                    let entry_slash = entry_raw
+                        .saturating_mul(slash_unbonding)
+                        .checked_div(pending)
+                        .unwrap_or(0)
+                        .min(entry_raw);
+                    if entry_slash > 0 {
+                        entry.amount = Amount::from_raw(entry_raw - entry_slash);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.persist_unbonding_entries();
+            }
+        }
+
+        Amount::from_raw(requested)
     }
 
     /// Record a slashing event in persistent storage for audit/query purposes.

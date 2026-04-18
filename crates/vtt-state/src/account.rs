@@ -94,6 +94,10 @@ pub struct UnbondingEntry {
     pub amount: Amount,
     /// Timestamp (ms) when unbonding completes.
     pub completion_time: Timestamp,
+    /// Validator the stake was being withdrawn from. Needed so a slash on
+    /// `validator` can reduce matching in-flight unbonding entries pro-rata,
+    /// preventing slash-evasion by unstaking just before the slash lands.
+    pub validator: Address,
 }
 
 #[cfg(test)]

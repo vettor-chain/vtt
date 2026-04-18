@@ -1209,6 +1209,7 @@ mod tests {
                 UnbondingEntry {
                     amount: Amount::from_vtt(1_000),
                     completion_time: 9_999_999_999,
+                    validator: addr,
                 },
             );
             db.mark_slashing_evidence(addr, 42, 7);
