@@ -6,14 +6,43 @@ use serde::{Deserialize, Serialize};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::{Address, BlockNumber, Vote, H256};
 
-/// Voting period in blocks (~7 days at 3s/block = 201600 blocks).
+/// Default voting period in blocks (~7 days at 3s/block = 201600 blocks).
+/// Operators can override this at runtime by setting the
+/// `VTT_VOTING_PERIOD_BLOCKS` environment variable — useful on testnets
+/// where a 7-day cycle would block every feature-flag iteration. The
+/// override is read once at startup and frozen via a `OnceLock`, so it
+/// cannot drift mid-chain.
 pub const VOTING_PERIOD_BLOCKS: u64 = 201_600;
 /// Quorum: 33% of staked VTT must vote.
 pub const QUORUM_BPS: u64 = 3300;
 /// Pass threshold: 50% + 1 of votes cast.
 pub const PASS_THRESHOLD_BPS: u64 = 5001;
-/// Execution delay in blocks (~24 hours at 3s/block).
+/// Default execution delay in blocks (~24 hours at 3s/block). Override
+/// with `VTT_EXECUTION_DELAY_BLOCKS`.
 pub const EXECUTION_DELAY_BLOCKS: u64 = 28_800;
+
+/// Effective voting period, respecting `VTT_VOTING_PERIOD_BLOCKS`.
+pub fn voting_period_blocks() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("VTT_VOTING_PERIOD_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(VOTING_PERIOD_BLOCKS)
+    })
+}
+
+/// Effective execution delay, respecting `VTT_EXECUTION_DELAY_BLOCKS`.
+pub fn execution_delay_blocks() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("VTT_EXECUTION_DELAY_BLOCKS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(EXECUTION_DELAY_BLOCKS)
+    })
+}
 
 /// Types of governance proposals.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
@@ -146,7 +175,7 @@ impl GovernanceSystem {
             action,
             description,
             created_at: current_block,
-            voting_end: current_block + VOTING_PERIOD_BLOCKS,
+            voting_end: current_block + voting_period_blocks(),
             status: ProposalStatus::Active,
             votes_yes: Amount::ZERO,
             votes_no: Amount::ZERO,

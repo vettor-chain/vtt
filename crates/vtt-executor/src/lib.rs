@@ -2049,7 +2049,7 @@ fn execute_governance_propose(
         action,
         description: description.to_string(),
         created_at: block_number,
-        voting_end: block_number + vtt_consensus::governance::VOTING_PERIOD_BLOCKS,
+        voting_end: block_number + vtt_consensus::governance::voting_period_blocks(),
         status: vtt_consensus::governance::ProposalStatus::Active,
         votes_yes: Amount::ZERO,
         votes_no: Amount::ZERO,
@@ -2219,7 +2219,7 @@ pub fn finalize_governance_proposals(
     current_block: u64,
     total_staked: Amount,
 ) -> u64 {
-    use vtt_consensus::governance::{ProposalStatus, EXECUTION_DELAY_BLOCKS};
+    use vtt_consensus::governance::{execution_delay_blocks, ProposalStatus};
 
     // Collect all proposal IDs and their raw bytes first (to avoid borrow
     // issues). Sorted by id so iteration order is deterministic across
@@ -2260,7 +2260,7 @@ pub fn finalize_governance_proposals(
         if passed {
             // Queue the proposal for execution after timelock delay
             let mut updated = proposal.clone();
-            let execute_after = current_block + EXECUTION_DELAY_BLOCKS;
+            let execute_after = current_block + execution_delay_blocks();
             updated.status = ProposalStatus::Queued { execute_after };
             let updated_bytes = match borsh::to_vec(&updated) {
                 Ok(b) => b,
