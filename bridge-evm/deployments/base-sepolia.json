@@ -1,0 +1,20 @@
+{
+  "chain": "base-sepolia",
+  "chainId": 84532,
+  "deployedAt": "2026-04-18T13:24:37Z",
+  "wvtt": "0x015413b55eB72826C5b7DFAE66250d51C8A43e8F",
+  "bridge": "0xc3fEF0b32383Af7C03577207D16db5f9f0077233",
+  "usdt": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "deployer": "0x29CF1525d9adD9a4B68c1d676fB649E735e39051",
+  "relayer": "0x5bbCc299b75b94A8AFb084879B758532e095B923",
+  "feeBps": 10,
+  "txHashes": {
+    "wvttDeploy": "0x243b97c41a222c8f8822fc13d4abbcbb6520321b83699abc3b6fb3015f7c604f",
+    "bridgeDeploy": "0x5cfdb3c3d285e3a364510b18e656a92f32797a05ff7d065e96a1559103d83abb",
+    "setBridge": "0x6d90301728f8ecb2f985d901d1e8256a887eaa9c9096a73ef8cbb7a86cb2139f"
+  },
+  "explorerUrls": {
+    "wvtt": "https://sepolia.basescan.org/address/0x015413b55eB72826C5b7DFAE66250d51C8A43e8F",
+    "bridge": "https://sepolia.basescan.org/address/0xc3fEF0b32383Af7C03577207D16db5f9f0077233"
+  }
+}
