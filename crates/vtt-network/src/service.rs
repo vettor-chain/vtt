@@ -74,7 +74,21 @@ pub enum NetworkEvent {
 impl NetworkService {
     /// Create a new network service.
     pub fn new(config: &NetworkConfig) -> std::result::Result<Self, NetworkError> {
-        let local_key = Keypair::generate_ed25519();
+        let local_key = match config.node_key_seed {
+            Some(seed) => {
+                // Separate the libp2p identity domain from any validator
+                // signing key that might share the same seed: hash the
+                // seed with a domain-separating tag before feeding it to
+                // ed25519. This way, leaking a peer_id never leaks the
+                // consensus signing key (and vice-versa).
+                let tagged = vtt_crypto::blake3_hash(&[b"vtt:libp2p:".as_slice(), &seed].concat());
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(tagged.as_bytes());
+                Keypair::ed25519_from_bytes(bytes)
+                    .map_err(|e| NetworkError::Transport(format!("derive libp2p key: {e}")))?
+            }
+            None => Keypair::generate_ed25519(),
+        };
         let local_peer_id = PeerId::from(local_key.public());
 
         info!(%local_peer_id, "starting VTT network node");

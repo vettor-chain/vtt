@@ -300,10 +300,16 @@ async fn main() {
         });
     }
 
-    // Network — use the chain_id from genesis for topic isolation
+    // Network — use the chain_id from genesis for topic isolation. The
+    // validator's seed drives a deterministic libp2p peer_id so restarts
+    // keep the same multiaddr (safe: a domain-separation tag inside
+    // NetworkService::new prevents the libp2p identity and consensus
+    // signing key from colliding).
     let mut net_config = NetworkConfig::dev(port);
     net_config.chain_id = chain_id;
     net_config.boot_nodes = bootnodes.clone();
+    net_config.listen_address = format!("/ip4/0.0.0.0/tcp/{port}");
+    net_config.node_key_seed = Some(validator_seed);
 
     let mut network = match NetworkService::new(&net_config) {
         Ok(n) => n,

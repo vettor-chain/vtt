@@ -18,6 +18,12 @@ pub struct NetworkConfig {
     pub ban_duration_secs: u64,
     /// Chain ID this node is operating on.
     pub chain_id: ChainId,
+    /// Optional 32-byte seed used to derive a deterministic libp2p
+    /// identity (and therefore a stable `peer_id` across restarts). When
+    /// `None`, a fresh random identity is generated on every start.
+    /// Operators that want a fixed bootnode multiaddr must set this.
+    #[serde(default)]
+    pub node_key_seed: Option<[u8; 32]>,
 }
 
 impl Default for NetworkConfig {
@@ -29,6 +35,7 @@ impl Default for NetworkConfig {
             max_peers_per_ip: 3,
             ban_duration_secs: 3600,
             chain_id: ChainId::RELAY,
+            node_key_seed: None,
         }
     }
 }
@@ -48,6 +55,7 @@ impl NetworkConfig {
             max_peers_per_ip: 3,
             ban_duration_secs: 3600,
             chain_id: ChainId::RELAY,
+            node_key_seed: None,
         }
     }
 }

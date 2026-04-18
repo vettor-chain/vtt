@@ -1,0 +1,102 @@
+# Three-validator local testnet.
+#
+#   docker compose -f docker-compose.multi-validator.yml up --build
+#
+# Uses `testnet_default` genesis which bakes in three validators seeded
+# from 0xA1..0xA1, 0xA2..0xA2, 0xA3..0xA3 (see
+# crates/vtt-genesis/src/lib.rs). val-1 acts as the bootnode; val-2 and
+# val-3 dial it over the docker bridge network. libp2p peer_ids are now
+# deterministic (derived from the validator seed), so restarts keep the
+# same multiaddr.
+#
+# RPC ports exposed to the host:
+#   val-1 -> 19944
+#   val-2 -> 29944
+#   val-3 -> 39944
+#
+# Smoke test after the first blocks are produced:
+#   curl -s -X POST -H 'content-type: application/json' \
+#       -d '{"jsonrpc":"2.0","id":1,"method":"vtt_chainStatus","params":[]}' \
+#       http://localhost:19944 | jq
+
+services:
+  vtt-val-1:
+    build: .
+    image: vtt-validator:local
+    container_name: vtt-val-1
+    command:
+      - "--testnet"
+      - "--seed"
+      - "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      - "--data-dir"
+      - "/data/vtt"
+      - "--port"
+      - "30333"
+      - "--rpc-port"
+      - "9944"
+    ports:
+      - "19944:9944"
+    volumes:
+      - val1_data:/data/vtt
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"vtt_chainStatus\",\"params\":[]}' http://localhost:9944 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  vtt-val-2:
+    build: .
+    image: vtt-validator:local
+    container_name: vtt-val-2
+    depends_on:
+      vtt-val-1:
+        condition: service_healthy
+    command:
+      - "--testnet"
+      - "--seed"
+      - "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+      - "--data-dir"
+      - "/data/vtt"
+      - "--port"
+      - "30333"
+      - "--rpc-port"
+      - "9944"
+      - "--bootnodes"
+      - "/dns4/vtt-val-1/tcp/30333"
+    ports:
+      - "29944:9944"
+    volumes:
+      - val2_data:/data/vtt
+    restart: unless-stopped
+
+  vtt-val-3:
+    build: .
+    image: vtt-validator:local
+    container_name: vtt-val-3
+    depends_on:
+      vtt-val-1:
+        condition: service_healthy
+    command:
+      - "--testnet"
+      - "--seed"
+      - "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+      - "--data-dir"
+      - "/data/vtt"
+      - "--port"
+      - "30333"
+      - "--rpc-port"
+      - "9944"
+      - "--bootnodes"
+      - "/dns4/vtt-val-1/tcp/30333"
+    ports:
+      - "39944:9944"
+    volumes:
+      - val3_data:/data/vtt
+    restart: unless-stopped
+
+volumes:
+  val1_data:
+  val2_data:
+  val3_data:
