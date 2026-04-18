@@ -18,6 +18,8 @@ pub enum MessagingError {
     InvalidProof(H256),
     #[error("destination chain not found: {0}")]
     DestinationNotFound(ChainId),
+    #[error("inbox pending queue full (cap {0}); apply back-pressure to the relay")]
+    InboxFull(usize),
 }
 
 pub type Result<T> = std::result::Result<T, MessagingError>;
@@ -177,21 +179,59 @@ impl MessageOutbox {
 }
 
 /// Inbox for a chain — receives messages from other chains via the relay.
+///
+/// Both the pending queue and the processed-id set are bounded:
+/// - `pending` rejects new messages with `InboxFull` once the cap is
+///   reached, forcing the relay to back off instead of filling RAM.
+/// - `processed` keeps a sliding window of the most recent N ids; when
+///   full, the oldest id is evicted. A replay that shows up after its
+///   dedup entry expired will be re-delivered — fine because the same
+///   window-eviction applies consistently on every replica, and the
+///   window is sized several orders of magnitude beyond the realistic
+///   relay throughput per session.
 pub struct MessageInbox {
     /// Chain this inbox belongs to.
     pub chain_id: ChainId,
-    /// Processed message IDs (to prevent replay).
+    /// Processed message IDs (to prevent replay) — O(1) membership.
     processed: std::collections::HashSet<H256>,
+    /// Insertion order of `processed` entries, for oldest-first eviction.
+    processed_order: VecDeque<H256>,
     /// Messages waiting to be processed.
     pending: VecDeque<CrossChainMessage>,
+    /// Hard cap on `pending`.
+    pending_cap: usize,
+    /// Hard cap on `processed`.
+    processed_cap: usize,
 }
+
+/// Default cap on pending messages. Sized to tolerate a relay burst while
+/// still keeping worst-case memory bounded (CrossChainMessage is a few
+/// hundred bytes + payload, so 10k ≈ few MB).
+pub const DEFAULT_INBOX_PENDING_CAP: usize = 10_000;
+/// Default dedup window. An id that ages out of the window can be
+/// redelivered — pick large enough that normal relay churn can't evict
+/// live messages.
+pub const DEFAULT_INBOX_PROCESSED_CAP: usize = 50_000;
 
 impl MessageInbox {
     pub fn new(chain_id: ChainId) -> Self {
+        Self::with_caps(
+            chain_id,
+            DEFAULT_INBOX_PENDING_CAP,
+            DEFAULT_INBOX_PROCESSED_CAP,
+        )
+    }
+
+    /// Construct with explicit caps. Both must be non-zero; zero inputs
+    /// are clamped to 1 so the inbox isn't silently disabled.
+    pub fn with_caps(chain_id: ChainId, pending_cap: usize, processed_cap: usize) -> Self {
         Self {
             chain_id,
             processed: std::collections::HashSet::new(),
+            processed_order: VecDeque::new(),
             pending: VecDeque::new(),
+            pending_cap: pending_cap.max(1),
+            processed_cap: processed_cap.max(1),
         }
     }
 
@@ -200,10 +240,24 @@ impl MessageInbox {
         if self.processed.contains(&msg.id) {
             return Err(MessagingError::AlreadyProcessed(msg.id));
         }
+        // Refuse before touching `processed` — otherwise we'd burn a dedup
+        // slot on a message we didn't actually accept.
+        if self.pending.len() >= self.pending_cap {
+            return Err(MessagingError::InboxFull(self.pending_cap));
+        }
 
         msg.status = MessageStatus::Delivered;
-        self.processed.insert(msg.id);
+        let msg_id = msg.id;
         self.pending.push_back(msg);
+
+        // Sliding dedup window: evict oldest id when at cap.
+        if self.processed.len() >= self.processed_cap {
+            if let Some(oldest) = self.processed_order.pop_front() {
+                self.processed.remove(&oldest);
+            }
+        }
+        self.processed.insert(msg_id);
+        self.processed_order.push_back(msg_id);
         Ok(())
     }
 
@@ -432,5 +486,63 @@ mod tests {
         let bytes = borsh::to_vec(&msg).unwrap();
         let msg2 = CrossChainMessage::try_from_slice(&bytes).unwrap();
         assert_eq!(msg, msg2);
+    }
+
+    fn make_msg(n: u64) -> CrossChainMessage {
+        CrossChainMessage::new(
+            n,
+            ChainId::new(1),
+            ChainId::new(2),
+            Address::from([0x01; 20]),
+            Address::from([0x02; 20]),
+            CrossChainPayload::DataMessage {
+                data: vec![n as u8],
+            },
+            n,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn inbox_rejects_when_pending_full() {
+        let mut inbox = MessageInbox::with_caps(ChainId::new(2), 2, 10);
+        inbox.receive(make_msg(0)).unwrap();
+        inbox.receive(make_msg(1)).unwrap();
+        let err = inbox.receive(make_msg(2)).unwrap_err();
+        assert!(matches!(err, MessagingError::InboxFull(2)));
+        // Drain one and the next receive succeeds
+        inbox.next_pending().unwrap();
+        inbox.receive(make_msg(2)).unwrap();
+        assert_eq!(inbox.pending_count(), 2);
+    }
+
+    #[test]
+    fn inbox_processed_window_evicts_oldest() {
+        // Processed cap of 3, pending cap large so we drain after each.
+        let mut inbox = MessageInbox::with_caps(ChainId::new(2), 100, 3);
+        for n in 0..3 {
+            inbox.receive(make_msg(n)).unwrap();
+            inbox.next_pending();
+        }
+        assert_eq!(inbox.processed_count(), 3);
+
+        // While still inside the window, every replay is rejected.
+        for n in 0..3 {
+            let err = inbox.receive(make_msg(n)).unwrap_err();
+            assert!(matches!(err, MessagingError::AlreadyProcessed(_)));
+        }
+
+        // Adding a 4th evicts the oldest (n=0) and keeps size at 3.
+        inbox.receive(make_msg(3)).unwrap();
+        inbox.next_pending();
+        assert_eq!(inbox.processed_count(), 3);
+
+        // n=0 has aged out — replay is allowed again.
+        inbox.receive(make_msg(0)).unwrap();
+
+        // n=2 is still inside the current window — replay rejected.
+        // (Adding n=0 just evicted n=1, so window is now {2, 3, 0}.)
+        let err = inbox.receive(make_msg(2)).unwrap_err();
+        assert!(matches!(err, MessagingError::AlreadyProcessed(_)));
     }
 }
