@@ -267,41 +267,7 @@ RocksDB automatically prunes old block bodies and receipts every 10,000 blocks. 
 - Internal errors are logged server-side and redacted in RPC responses
 - Response pagination: max 100 items per query
 
-## 16. Local 3-validator Testnet
-
-For BFT smoke-testing without standing up three VMs, use the provided
-Docker Compose file at the repo root:
-
-```bash
-docker compose -f docker-compose.multi-validator.yml up --build
-```
-
-This builds one image and runs three validators (val-1, val-2, val-3)
-from the `testnet_default` genesis. val-1 acts as the bootnode; the
-other two dial it over the docker bridge network. Peer_ids are
-deterministic, so restarts keep the same multiaddr and you can reason
-about the p2p graph over time.
-
-RPC is exposed on the host at:
-
-| Container | RPC port |
-|---|---|
-| val-1 | `localhost:19944` |
-| val-2 | `localhost:29944` |
-| val-3 | `localhost:39944` |
-
-Sanity checks worth running:
-
-- **Blocks advance on all three**: `vtt_chainStatus` heights should move
-  together within ±1 block.
-- **Kill a validator**: `docker compose stop vtt-val-2`. The remaining
-  two keep producing blocks; vtt-val-2 should resume from its last
-  finalised head when restarted.
-- **Double-sign detection**: start two instances with the same seed on
-  different ports (manually, not via Compose) and observe
-  `slashing_seen` being populated via automatic detection.
-
-## 17. Deterministic `peer_id`
+## 16. Deterministic `peer_id`
 
 Every validator derives its libp2p identity from its signing seed via a
 domain-separated blake3 hash (`blake3("vtt:libp2p:" ++ seed)`). This
@@ -315,7 +281,7 @@ means:
 An operator publishing a bootnode multiaddr for others to dial can
 therefore compute it once (off the seed) and keep it stable.
 
-## 18. DB Schema Versioning
+## 17. DB Schema Versioning
 
 On first open, RocksDB gets a `schema:version` stamp under ChainMeta. On every
 subsequent start the validator verifies the stamp against the binary's
