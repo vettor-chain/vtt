@@ -911,10 +911,12 @@ impl VttApiServer for VttRpcImpl {
         if let Some((n, idx)) = chain.get_tx_location(&hash) {
             if let Some(block) = chain.get_block_by_number(n) {
                 if let Some(tx) = block.transactions.get(idx as usize) {
+                    let swap_out = lookup_swap_amount_out(&chain, &hash);
                     return Ok(Some(tx_to_info(
                         tx,
                         block.header.number,
                         block.header.timestamp,
+                        swap_out,
                     )));
                 }
             }
@@ -926,10 +928,12 @@ impl VttApiServer for VttRpcImpl {
                 for tx in &block.transactions {
                     let tx_hash = blake3_hash(&tx.payload_bytes());
                     if tx_hash == hash {
+                        let swap_out = lookup_swap_amount_out(&chain, &tx_hash);
                         return Ok(Some(tx_to_info(
                             tx,
                             block.header.number,
                             block.header.timestamp,
+                            swap_out,
                         )));
                     }
                 }
@@ -1320,10 +1324,17 @@ fn gov_proposal_to_info(p: &vtt_consensus::governance::Proposal) -> ProposalInfo
 }
 
 /// Build a `TransactionInfo` from a `SignedTransaction` within a block.
+///
+/// `swap_amount_out` should be provided by the caller for Swap
+/// transactions — it's sourced from the receipt's `Swap` log and
+/// represents the real clearing amount. The function itself is
+/// receipt-agnostic; callers that don't have cheap receipt access can
+/// pass `None` and the field will simply be omitted from the response.
 fn tx_to_info(
     tx: &vtt_primitives::transaction::SignedTransaction,
     block_number: BlockNumber,
     timestamp: u64,
+    swap_amount_out: Option<Amount>,
 ) -> TransactionInfo {
     use vtt_primitives::transaction::TransactionAction;
 
@@ -1599,7 +1610,32 @@ fn tx_to_info(
         swap_pool_id,
         swap_token_in,
         swap_min_out,
+        swap_amount_out,
     }
+}
+
+/// Decode the `amount_out` value emitted by the executor's `Swap` log.
+///
+/// The executor writes `borsh::to_vec(&amount_out.0)` where `amount_out.0`
+/// is a `u128`. We look up the receipt for the tx, find the log whose
+/// first topic is `blake3("Swap")`, and decode the data payload. Absent
+/// on failed txs or when the chain dropped the receipt.
+fn lookup_swap_amount_out(chain: &Chain, tx_hash: &H256) -> Option<Amount> {
+    let receipt = chain.get_receipt(tx_hash)?;
+    if !receipt.success {
+        return None;
+    }
+    let swap_topic = blake3_hash(b"Swap");
+    for log in &receipt.logs {
+        if log.topics.first() == Some(&swap_topic) {
+            // Data is 16 little-endian bytes (u128).
+            if log.data.len() >= 16 {
+                let bytes: [u8; 16] = log.data[..16].try_into().ok()?;
+                return Some(Amount::from_raw(u128::from_le_bytes(bytes)));
+            }
+        }
+    }
+    None
 }
 
 /// Walk recent blocks (newest first), collecting transactions that pass
@@ -1623,7 +1659,18 @@ fn collect_txs_until<F: Fn(&TransactionInfo) -> bool>(
             let ts = block.header.timestamp;
             let bn = block.header.number;
             for tx in &block.transactions {
-                let info = tx_to_info(tx, bn, ts);
+                // Only pay the receipt lookup cost for Swap txs — avoids
+                // touching the receipt index for every Transfer / Stake /
+                // etc. while scanning.
+                let swap_out = if matches!(
+                    &tx.payload.action,
+                    vtt_primitives::transaction::TransactionAction::Swap { .. }
+                ) {
+                    lookup_swap_amount_out(chain, &blake3_hash(&tx.payload_bytes()))
+                } else {
+                    None
+                };
+                let info = tx_to_info(tx, bn, ts, swap_out);
                 if accept(&info) {
                     txs.push(info);
                     if txs.len() >= cap {

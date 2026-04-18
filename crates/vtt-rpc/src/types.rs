@@ -228,9 +228,16 @@ pub struct TransactionInfo {
     /// Swap-specific: token being sold (hex)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_token_in: Option<String>,
-    /// Swap-specific: minimum output amount
+    /// Swap-specific: minimum output amount (slippage protection — what
+    /// the signer was willing to accept).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swap_min_out: Option<Amount>,
+    /// Swap-specific: actual output amount emitted by the `Swap` log —
+    /// the real clearing amount at execution time. Absent when the tx
+    /// failed before emitting the log, or when the receipt is no longer
+    /// indexed (deep pruning).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_amount_out: Option<Amount>,
 }
 
 /// Paginated result wrapper.
