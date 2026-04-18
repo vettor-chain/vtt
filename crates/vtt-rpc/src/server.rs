@@ -1708,11 +1708,25 @@ impl RpcServer {
             .await?;
         let local_addr = server.local_addr()?;
 
+        let state_for_cleanup = self.state.clone();
         let rpc_impl = VttRpcImpl { state: self.state };
 
         let handle = server.start(rpc_impl.into_rpc());
 
         info!(%local_addr, "JSON-RPC server started");
+
+        // Periodic rate-limiter cleanup: without this the per-IP client
+        // HashMap grows unbounded over the lifetime of the node since
+        // every new IP pins a (count, window_start) entry. Every minute
+        // we prune entries idle for 60+ seconds.
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                state_for_cleanup.send_tx_limiter.cleanup();
+                state_for_cleanup.heavy_read_limiter.cleanup();
+            }
+        });
 
         // Keep the server running in the background
         tokio::spawn(async move {

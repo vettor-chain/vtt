@@ -172,7 +172,24 @@ pub fn execute_transaction_at(
         return fail_receipt(tx_hash, 0);
     }
 
-    // 4. Calculate gas cost
+    // 4. Enforce the effective minimum gas price. The txpool also gates
+    // this on submission, but a malicious producer could assemble a block
+    // that bypasses their own pool — import_block re-checks here so every
+    // node rejects the same sub-minimum-fee tx deterministically.
+    let effective_min_gas_price = state
+        .get_min_gas_price_override()
+        .unwrap_or(gas_config.min_gas_price);
+    if tx.payload.gas_price < effective_min_gas_price {
+        debug!(
+            ?tx_hash,
+            got = %tx.payload.gas_price,
+            min = %effective_min_gas_price,
+            "gas_price below network minimum"
+        );
+        return fail_receipt(tx_hash, 0);
+    }
+
+    // 5. Calculate gas cost
     let gas_cost = calculate_gas_cost(&tx.payload.action, gas_config);
     let gas_to_use = gas_cost.min(tx.payload.gas_limit);
     let gas_fee = tx
