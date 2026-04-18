@@ -204,6 +204,55 @@ pub fn validate_genesis(config: &GenesisConfig) -> Result<(), String> {
         }
     }
 
+    // Validator addresses must be unique — a duplicate would silently
+    // collapse into one account with the wrong stake on init.
+    {
+        let mut seen = std::collections::HashSet::with_capacity(config.validators.len());
+        for v in &config.validators {
+            if !seen.insert(v.address) {
+                return Err(format!(
+                    "duplicate validator address in genesis: {}",
+                    v.address
+                ));
+            }
+        }
+    }
+
+    // Allocation addresses must be unique too.
+    {
+        let mut seen = std::collections::HashSet::with_capacity(config.allocations.len());
+        for a in &config.allocations {
+            if !seen.insert(a.address) {
+                return Err(format!(
+                    "duplicate allocation address in genesis: {}",
+                    a.address
+                ));
+            }
+            if a.balance.raw() == 0 {
+                return Err(format!("allocation for {} has zero balance", a.address));
+            }
+        }
+    }
+
+    // Consensus parameters must be within sane bounds so the chain can
+    // actually produce blocks and slashing math doesn't wrap.
+    let params = &config.chain.consensus;
+    if params.active_validators == 0 {
+        return Err("active_validators must be > 0".into());
+    }
+    if params.block_time_ms == 0 {
+        return Err("block_time_ms must be > 0".into());
+    }
+    if params.slash_double_sign_bps > 10_000 {
+        return Err("slash_double_sign_bps must be <= 10000 basis points".into());
+    }
+    if params.slash_downtime_bps > 10_000 {
+        return Err("slash_downtime_bps must be <= 10000 basis points".into());
+    }
+    if params.downtime_threshold_pct > 100 {
+        return Err("downtime_threshold_pct must be <= 100".into());
+    }
+
     Ok(())
 }
 

@@ -739,9 +739,16 @@ impl StateDB {
 
     /// Load all storage entries for a contract address into a HashMap.
     pub fn load_contract_storage(&self, address: &Address) -> HashMap<Vec<u8>, Vec<u8>> {
+        // Hard cap on the number of entries eagerly pulled into the VM
+        // context. A contract with unbounded storage would otherwise force
+        // the executor to copy every entry into a HashMap before any gas
+        // metering runs. Contracts needing more state should paginate or
+        // use a lazy-read host function in a future VM revision.
+        const MAX_EAGER_ENTRIES: usize = 10_000;
         self.contract_storage
             .iter()
             .filter(|((addr, _), _)| addr == address)
+            .take(MAX_EAGER_ENTRIES)
             .map(|((_, key), value)| (key.clone(), value.clone()))
             .collect()
     }

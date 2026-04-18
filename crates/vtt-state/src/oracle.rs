@@ -301,4 +301,21 @@ mod tests {
         let feed2 = OracleFeed::try_from_slice(&bytes).unwrap();
         assert_eq!(feed, feed2);
     }
+
+    #[test]
+    fn feed_roundtrip_preserves_decimals() {
+        let feed = OracleFeed::new_with_decimals(
+            blake3_hash(b"BTC/USD"),
+            "BTC/USD".to_string(),
+            OracleFeedType::MarketPrice("BTC/USD".to_string()),
+            vec![Address::from([0xA0; 20]), Address::from([0xB0; 20])],
+            2,
+            60_000,
+            8, // not the default
+        );
+        let bytes = borsh::to_vec(&feed).unwrap();
+        let feed2 = OracleFeed::try_from_slice(&bytes).unwrap();
+        assert_eq!(feed2.decimals, 8);
+        assert_eq!(feed, feed2);
+    }
 }

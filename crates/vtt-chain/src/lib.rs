@@ -594,10 +594,18 @@ impl Chain {
         // RPC layer can fetch them for get_transaction / event log queries.
         if let Some(ref storage) = self.storage {
             if let Ok(header_bytes) = borsh::to_vec(&block.header) {
-                let _ = storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes);
+                if let Err(e) =
+                    storage.put(Column::BlockHeaders, block_hash.as_bytes(), &header_bytes)
+                {
+                    tracing::warn!(?block_hash, %e, "failed to persist block header");
+                }
             }
             if let Ok(block_bytes) = borsh::to_vec(&block) {
-                let _ = storage.put(Column::BlockBodies, block_hash.as_bytes(), &block_bytes);
+                if let Err(e) =
+                    storage.put(Column::BlockBodies, block_hash.as_bytes(), &block_bytes)
+                {
+                    tracing::warn!(?block_hash, %e, "failed to persist block body");
+                }
             }
             for receipt in &receipts {
                 if let Ok(bytes) = borsh::to_vec(receipt) {

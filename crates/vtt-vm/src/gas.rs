@@ -16,10 +16,16 @@ impl GasMeter {
         }
     }
 
-    /// Consume gas. Returns false if limit exceeded.
+    /// Consume gas. Returns false if the limit is exceeded, including the
+    /// case where `prev + amount` would overflow u64 — previously the sum
+    /// wrapped silently, so a malicious guest requesting an absurd amount
+    /// (e.g. near u64::MAX) could make the check pass.
     pub fn consume(&self, amount: u64) -> bool {
         let prev = self.used.fetch_add(amount, Ordering::SeqCst);
-        prev + amount <= self.limit
+        match prev.checked_add(amount) {
+            Some(new) => new <= self.limit,
+            None => false,
+        }
     }
 
     /// Get the amount of gas used so far.

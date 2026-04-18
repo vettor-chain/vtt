@@ -384,8 +384,21 @@ impl NetworkService {
                         continue;
                     }
 
-                    if let Ok(msg) = NetworkMessage::decode(&message.data) {
-                        return NetworkEvent::Message(Box::new(msg));
+                    match NetworkMessage::decode(&message.data) {
+                        Ok(msg) => return NetworkEvent::Message(Box::new(msg)),
+                        Err(e) => {
+                            // Malformed gossip is a cheap DoS surface; charge
+                            // the peer so repeat offenders get disconnected
+                            // via the reputation layer.
+                            tracing::debug!(
+                                peer = %propagation_source,
+                                size = message.data.len(),
+                                error = %e,
+                                "peer sent undecodable gossip message"
+                            );
+                            self.penalize(&propagation_source, 25);
+                            continue;
+                        }
                     }
                 }
                 _ => {}
