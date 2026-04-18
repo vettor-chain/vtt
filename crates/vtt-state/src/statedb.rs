@@ -1184,11 +1184,15 @@ impl StateDB {
         // caller's requested `amount` over `(total_stake + pending)`; we
         // cap at the combined pool so the final slash can't exceed what
         // actually exists on-chain.
+        // Legacy entries migrated from a pre-validator schema carry
+        // Address::ZERO — skip them since we can't confirm they belong to
+        // this validator.
+        let target_ok = |v: &Address| *v != Address::ZERO && v == validator;
         let pending: u128 = self
             .unbonding_entries
             .values()
             .flat_map(|entries| entries.iter())
-            .filter(|e| e.validator == *validator)
+            .filter(|e| target_ok(&e.validator))
             .map(|e| e.amount.raw())
             .sum();
         let combined = staking.total_stake.raw().saturating_add(pending);
@@ -1220,7 +1224,7 @@ impl StateDB {
             let mut changed = false;
             for entries in self.unbonding_entries.values_mut() {
                 for entry in entries.iter_mut() {
-                    if entry.validator != *validator {
+                    if !target_ok(&entry.validator) {
                         continue;
                     }
                     // entry_slash = slash_unbonding * entry.amount / pending
@@ -1235,7 +1239,11 @@ impl StateDB {
                         changed = true;
                     }
                 }
+                // Drop entries that the slash zeroed out so the blob
+                // doesn't accumulate dust.
+                entries.retain(|e| !e.amount.is_zero());
             }
+            self.unbonding_entries.retain(|_, v| !v.is_empty());
             if changed {
                 self.persist_unbonding_entries();
             }
@@ -1432,8 +1440,49 @@ impl StateDB {
             }
         }
         if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"unbonding:all") {
-            if let Ok(items) = borsh::from_slice::<Vec<(Address, Vec<UnbondingEntry>)>>(&bytes) {
-                self.unbonding_entries = items.into_iter().collect();
+            match borsh::from_slice::<Vec<(Address, Vec<UnbondingEntry>)>>(&bytes) {
+                Ok(items) => {
+                    self.unbonding_entries = items.into_iter().collect();
+                }
+                Err(_) => {
+                    // Fallback: the on-disk blob may pre-date the addition
+                    // of `UnbondingEntry.validator`. Decode the legacy
+                    // {amount, completion_time} layout and migrate with
+                    // `Address::ZERO` as an "unknown validator" sentinel so
+                    // process_unbonding still credits the staker at
+                    // maturity; apply_slash skips these since we no longer
+                    // know which validator they were unbonding from.
+                    #[derive(borsh::BorshDeserialize)]
+                    struct LegacyUnbondingEntry {
+                        amount: Amount,
+                        completion_time: Timestamp,
+                    }
+                    if let Ok(legacy) =
+                        borsh::from_slice::<Vec<(Address, Vec<LegacyUnbondingEntry>)>>(&bytes)
+                    {
+                        let migrated: HashMap<Address, Vec<UnbondingEntry>> = legacy
+                            .into_iter()
+                            .map(|(addr, entries)| {
+                                let new_entries = entries
+                                    .into_iter()
+                                    .map(|e| UnbondingEntry {
+                                        amount: e.amount,
+                                        completion_time: e.completion_time,
+                                        validator: Address::ZERO,
+                                    })
+                                    .collect::<Vec<_>>();
+                                (addr, new_entries)
+                            })
+                            .collect();
+                        tracing::warn!(
+                            entries = migrated.values().map(|v| v.len()).sum::<usize>(),
+                            "migrated legacy unbonding entries; slash protection not applied"
+                        );
+                        self.unbonding_entries = migrated;
+                    } else {
+                        tracing::warn!("failed to decode unbonding:all blob — entries may be lost");
+                    }
+                }
             }
         }
         if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"kyc:approved") {

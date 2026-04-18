@@ -444,6 +444,15 @@ impl Chain {
             });
         }
 
+        // Snapshot the entire StateDB before any block-scoped mutation so a
+        // downstream failure (state_root mismatch, invalid block, etc.) can
+        // roll back cleanly. Without this, the epoch-rotation slashing,
+        // double-sign detection, missed-slot tracking and tx execution
+        // would all persist even if the block were ultimately rejected at
+        // the state_root check — corrupting state for the next import.
+        let block_snapshot = self.state.snapshot();
+        let validator_set_snapshot = self.validator_set.clone();
+
         // 4. Check for epoch transition and update validator set
         let block_epoch = self.consensus.epoch_for_block(block.header.number);
         if block_epoch > self.validator_set.epoch {
@@ -581,9 +590,13 @@ impl Chain {
             block.header.chain_id,
         );
 
-        // 7. Verify state root
+        // 7. Verify state root. Any mismatch reverts every mutation this
+        // import made (epoch slashing, double-sign slash, missed slots,
+        // executed txs) via the snapshot taken at the top of import_block.
         let computed_state_root = self.state.compute_state_root();
         if block.header.state_root != computed_state_root {
+            self.state.restore(block_snapshot);
+            self.validator_set = validator_set_snapshot;
             return Err(ChainError::InvalidStateRoot {
                 expected: computed_state_root,
                 got: block.header.state_root,
