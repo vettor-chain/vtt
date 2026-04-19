@@ -5,12 +5,15 @@ use thiserror::Error;
 use tracing::debug;
 
 use vtt_consensus::governance::{Proposal, ProposalAction};
+use vtt_consensus::rewards::{
+    calculate_epoch_reward, split_block_reward, split_gas_fees, split_producer_reward,
+};
 use vtt_crypto::{blake3_hash, verify};
 use vtt_primitives::amount::Amount;
 use vtt_primitives::asset_governance::{
     AssetProposal, AssetProposalAction, AssetProposalStatus, ASSET_VOTING_PERIOD_BLOCKS,
 };
-use vtt_primitives::chain::GasConfig;
+use vtt_primitives::chain::{ConsensusParams, GasConfig};
 use vtt_primitives::transaction::{Log, SignedTransaction, TransactionAction, TransactionReceipt};
 use vtt_primitives::{Address, ChainId, Vote, H256};
 use vtt_state::account::AccountState;
@@ -2867,6 +2870,175 @@ fn fail_receipt(tx_hash: H256, gas_used: u64) -> ExecutionResult {
         },
         gas_used,
     }
+}
+
+/// Initial supply used in the inflation formula. Must match the genesis
+/// total across all validator/delegator/treasury balances so the circulating
+/// supply calculation is the same on every node.
+const INITIAL_SUPPLY_VTT: u64 = 1_000_000_000;
+
+/// Summary of state mutations applied by `apply_block_rewards_and_governance`.
+/// Consumers may use this for telemetry — it has no consensus significance.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockSettlementSummary {
+    pub minted: Amount,
+    pub burned: Amount,
+    pub treasury: Amount,
+    pub producer_total: Amount,
+    pub governance_finalized: u64,
+    pub governance_executed: u64,
+}
+
+/// Pay a producer reward according to the validator's declared commission:
+/// commission_bps goes to the validator, the remainder is split pro-rata
+/// between self-stake and all active delegators. Falls back to crediting
+/// the validator if staking state is missing.
+fn distribute_producer_reward(
+    state: &mut StateDB,
+    validator_addr: &Address,
+    producer_reward: Amount,
+) {
+    if producer_reward.raw() == 0 {
+        return;
+    }
+    let account = state.get_account(validator_addr);
+    let staking = match account.staking.as_ref() {
+        Some(s) if s.total_stake.raw() > 0 => s.clone(),
+        _ => {
+            let _ = state.add_balance(validator_addr, producer_reward);
+            return;
+        }
+    };
+
+    let split = split_producer_reward(producer_reward, staking.commission_bps);
+    if split.validator_commission.raw() > 0 {
+        let _ = state.add_balance(validator_addr, split.validator_commission);
+    }
+
+    let total_stake = staking.total_stake.raw();
+    let stakers_pool = split.staker_rewards.raw();
+    if stakers_pool == 0 || total_stake == 0 {
+        return;
+    }
+
+    let self_share = staking
+        .self_stake
+        .raw()
+        .saturating_mul(stakers_pool)
+        .checked_div(total_stake)
+        .unwrap_or(0);
+    if self_share > 0 {
+        let _ = state.add_balance(validator_addr, Amount::from_raw(self_share));
+    }
+
+    let mut distributed = self_share;
+    for delegation in &staking.delegations {
+        let share = delegation
+            .amount
+            .raw()
+            .saturating_mul(stakers_pool)
+            .checked_div(total_stake)
+            .unwrap_or(0);
+        if share == 0 {
+            continue;
+        }
+        let _ = state.add_balance(&delegation.delegator, Amount::from_raw(share));
+        distributed = distributed.saturating_add(share);
+    }
+
+    if distributed < stakers_pool {
+        let dust = stakers_pool - distributed;
+        let _ = state.add_balance(validator_addr, Amount::from_raw(dust));
+    }
+}
+
+/// Deterministic post-execution settlement for a block: governance
+/// finalization, timelocked proposal execution, inflation-based block
+/// reward, and gas-fee split/burn. Every node — producer and peer alike —
+/// must run this in an identical way so the resulting `state_root` agrees.
+///
+/// The supply counters (`total_minted_milli`, `total_burned_milli`) live
+/// in `StateDB` and are updated here, so cold-started peers compute the
+/// same inflation from persisted state without needing the validator's
+/// in-memory atomics.
+///
+/// `total_staked` must be the stake snapshot from BEFORE any epoch
+/// rotation applied during this block, matching the producer path.
+pub fn apply_block_rewards_and_governance(
+    state: &mut StateDB,
+    block_number: u64,
+    gas_used: u64,
+    gas_config: &GasConfig,
+    producer: &Address,
+    total_staked: Amount,
+    consensus_params: &ConsensusParams,
+) -> BlockSettlementSummary {
+    let mut summary = BlockSettlementSummary::default();
+
+    // Governance: auto-finalize at the end of each voting period, then
+    // run any proposal whose timelock has expired. The order matches
+    // vtt-validator::try_produce_block's pre-refactor behavior so the
+    // state_root stays byte-identical to what we produced before the
+    // consolidation.
+    summary.governance_finalized =
+        finalize_governance_proposals(state, block_number, total_staked);
+    summary.governance_executed = execute_queued_proposals(state, block_number);
+
+    // Block reward — inflation-based, 80% producer / 20% treasury.
+    let treasury_addr = consensus_params.treasury_address;
+    let epoch_length = consensus_params.epoch_length;
+
+    let milli_to_raw = 10u128.pow(15);
+    let initial_supply = Amount::from_vtt(INITIAL_SUPPLY_VTT);
+    let minted_so_far =
+        Amount::from_raw(state.total_minted_milli() as u128 * milli_to_raw);
+    let burned_so_far =
+        Amount::from_raw(state.total_burned_milli() as u128 * milli_to_raw);
+    let total_supply = Amount::from_raw(
+        initial_supply
+            .raw()
+            .saturating_add(minted_so_far.raw())
+            .saturating_sub(burned_so_far.raw()),
+    );
+    let staking_ratio_pct = if total_supply.raw() > 0 {
+        (total_staked.raw() * 100 / total_supply.raw()) as u64
+    } else {
+        0
+    };
+    let epoch_reward = calculate_epoch_reward(total_supply, staking_ratio_pct);
+    let per_block_reward = if epoch_length > 0 {
+        Amount::from_raw(epoch_reward.raw() / epoch_length as u128)
+    } else {
+        Amount::ZERO
+    };
+
+    if per_block_reward.raw() > 0 {
+        let split = split_block_reward(per_block_reward);
+        distribute_producer_reward(state, producer, split.producer);
+        let _ = state.add_balance(&treasury_addr, split.treasury);
+        let minted_milli = (per_block_reward.raw() / milli_to_raw) as u64;
+        state.record_mint_milli(minted_milli);
+        summary.minted = per_block_reward;
+        summary.producer_total = split.producer;
+        summary.treasury = split.treasury;
+    }
+
+    // Gas fees — 70% burned, 30% to producer (commission-aware).
+    let total_gas_fees =
+        Amount::from_raw(gas_used as u128 * gas_config.min_gas_price.raw());
+    if total_gas_fees.raw() > 0 {
+        let gas_split = split_gas_fees(total_gas_fees);
+        distribute_producer_reward(state, producer, gas_split.producer);
+        let burned_milli = (gas_split.burned.raw() / milli_to_raw) as u64;
+        state.record_burn_milli(burned_milli);
+        summary.burned = gas_split.burned;
+        summary.producer_total = summary
+            .producer_total
+            .checked_add(gas_split.producer)
+            .unwrap_or(summary.producer_total);
+    }
+
+    summary
 }
 
 #[cfg(test)]

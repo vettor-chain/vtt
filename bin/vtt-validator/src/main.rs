@@ -7,18 +7,12 @@ use tracing_subscriber::EnvFilter;
 
 use vtt_chain::Chain;
 use vtt_consensus::finality::{FinalityTracker, FinalityVote};
-use vtt_consensus::rewards::{
-    calculate_epoch_reward, split_block_reward, split_gas_fees, split_producer_reward,
-};
 use vtt_consensus::ConsensusEngine;
 use vtt_crypto::{blake3_hash, merkle_root, Keypair};
-use vtt_executor::{
-    execute_block_transactions_at, execute_queued_proposals, finalize_governance_proposals,
-};
+use vtt_executor::{apply_block_rewards_and_governance, execute_block_transactions_at};
 use vtt_genesis::{build_genesis, genesis_hash, GenesisConfig};
 use vtt_network::messages::NetworkMessage;
 use vtt_network::{NetworkConfig, NetworkEvent, NetworkService};
-use vtt_primitives::amount::Amount;
 use vtt_primitives::block::{Block, BlockHeader};
 use vtt_primitives::chain::GasConfig;
 use vtt_primitives::{Address, Signature, H256};
@@ -837,80 +831,45 @@ fn try_produce_block(
         head.chain_id,
     );
 
-    // --- M4: Auto-finalize governance proposals whose voting period has ended ---
-    let total_staked = chain.validator_set().total_stake();
-    let gov_finalized = finalize_governance_proposals(chain.state_mut(), next_number, total_staked);
-    if gov_finalized > 0 {
-        info!(count = gov_finalized, "governance proposals auto-finalized");
-    }
-
-    // --- Execute queued governance proposals whose timelock has expired ---
-    let gov_executed = execute_queued_proposals(chain.state_mut(), next_number);
-    if gov_executed > 0 {
+    // Deterministic post-execution settlement — governance finalization,
+    // timelocked proposal execution, block reward, gas-fee split. The
+    // exact same function runs on peer nodes inside `import_block`, so
+    // producer and importers compute matching state_roots.
+    let consensus_params = chain.consensus().params().clone();
+    let settlement = apply_block_rewards_and_governance(
+        chain.state_mut(),
+        next_number,
+        gas_used,
+        gas_config,
+        &validator_addr,
+        validator_set.total_stake(),
+        &consensus_params,
+    );
+    if settlement.governance_finalized > 0 {
         info!(
-            count = gov_executed,
+            count = settlement.governance_finalized,
+            "governance proposals auto-finalized"
+        );
+    }
+    if settlement.governance_executed > 0 {
+        info!(
+            count = settlement.governance_executed,
             "queued governance proposals executed after timelock"
         );
     }
 
-    // --- Block rewards & gas fee distribution ---
-    let treasury_addr = chain.consensus().params().treasury_address;
-
-    // 1. Block reward: inflation-based, split 80% producer / 20% treasury
-    let total_staked = validator_set.total_stake();
-    // Circulating supply = initial genesis supply (1B) + total minted - total burned
-    let initial_supply = Amount::from_vtt(1_000_000_000);
-    let minted = Amount::from_raw(
-        rpc_state
-            .total_minted_milli
-            .load(std::sync::atomic::Ordering::Relaxed) as u128
-            * 10u128.pow(15),
-    );
-    let burned = Amount::from_raw(
-        rpc_state
-            .total_burned_milli
-            .load(std::sync::atomic::Ordering::Relaxed) as u128
-            * 10u128.pow(15),
-    );
-    let total_supply = Amount::from_raw(
-        initial_supply
-            .raw()
-            .saturating_add(minted.raw())
-            .saturating_sub(burned.raw()),
-    );
-    let staking_ratio_pct = if total_supply.raw() > 0 {
-        (total_staked.raw() * 100 / total_supply.raw()) as u64
-    } else {
-        0
-    };
-    let epoch_reward = calculate_epoch_reward(total_supply, staking_ratio_pct);
-    let epoch_length = chain.consensus().params().epoch_length;
-    let per_block_reward = if epoch_length > 0 {
-        Amount::from_raw(epoch_reward.raw() / epoch_length as u128)
-    } else {
-        Amount::ZERO
-    };
-
-    if per_block_reward.raw() > 0 {
-        let split = split_block_reward(per_block_reward);
-        distribute_producer_reward(chain.state_mut(), &validator_addr, split.producer);
-        let _ = chain
-            .state_mut()
-            .add_balance(&treasury_addr, split.treasury);
-        // Track in milli-VTT (raw / 10^15)
-        let minted_milli = (per_block_reward.raw() / 10u128.pow(15)) as u64;
+    // Mirror settlement totals into the RPC metrics cache. These counters
+    // are purely observability — the authoritative supply figure now
+    // lives in StateDB and is updated inside apply_block_rewards_and_governance.
+    let milli_to_raw = 10u128.pow(15);
+    if settlement.minted.raw() > 0 {
+        let minted_milli = (settlement.minted.raw() / milli_to_raw) as u64;
         rpc_state
             .total_minted_milli
             .fetch_add(minted_milli, std::sync::atomic::Ordering::Relaxed);
     }
-
-    // 2. Gas fees: 70% burned, 30% to producer (commission-aware)
-    let total_gas_fees = Amount::from_raw(gas_used as u128 * gas_config.min_gas_price.raw());
-    if total_gas_fees.raw() > 0 {
-        let gas_split = split_gas_fees(total_gas_fees);
-        // burned portion is simply not credited to anyone (effectively removed)
-        distribute_producer_reward(chain.state_mut(), &validator_addr, gas_split.producer);
-        let burned_milli = (gas_split.burned.raw() / 10u128.pow(15)) as u64;
+    if settlement.burned.raw() > 0 {
+        let burned_milli = (settlement.burned.raw() / milli_to_raw) as u64;
         rpc_state
             .total_burned_milli
             .fetch_add(burned_milli, std::sync::atomic::Ordering::Relaxed);
@@ -964,9 +923,12 @@ fn try_produce_block(
         block: block.clone(),
     };
 
-    // Import our own block
+    // Import our own block. Pre-execution above already mutated state and
+    // produced the canonical receipts; pass them through so import_block
+    // doesn't re-execute (which would nonce-mismatch every tx and write
+    // bogus fail_receipt entries over the real ones).
     let produced_number = block.header.number;
-    match chain.import_block(block) {
+    match chain.import_produced_block(block, receipts) {
         Ok(result) => {
             // Remove mined transactions from the pool by committed nonce
             let mut pool = match txpool.write() {
@@ -1001,69 +963,3 @@ fn try_produce_block(
     }
 }
 
-/// Pay a producer reward according to the validator's declared commission:
-/// commission_bps goes to the validator, the remainder is split pro-rata
-/// between self-stake and all active delegators. Falls back to crediting
-/// the validator if staking state is missing.
-fn distribute_producer_reward(
-    state: &mut vtt_state::StateDB,
-    validator_addr: &Address,
-    producer_reward: Amount,
-) {
-    if producer_reward.raw() == 0 {
-        return;
-    }
-    let account = state.get_account(validator_addr);
-    let staking = match account.staking.as_ref() {
-        Some(s) if s.total_stake.raw() > 0 => s.clone(),
-        _ => {
-            let _ = state.add_balance(validator_addr, producer_reward);
-            return;
-        }
-    };
-
-    let split = split_producer_reward(producer_reward, staking.commission_bps);
-    // Commission to the validator operator
-    if split.validator_commission.raw() > 0 {
-        let _ = state.add_balance(validator_addr, split.validator_commission);
-    }
-
-    let total_stake = staking.total_stake.raw();
-    let stakers_pool = split.staker_rewards.raw();
-    if stakers_pool == 0 || total_stake == 0 {
-        return;
-    }
-
-    // Self-stake share for the validator
-    let self_share = staking
-        .self_stake
-        .raw()
-        .saturating_mul(stakers_pool)
-        .checked_div(total_stake)
-        .unwrap_or(0);
-    if self_share > 0 {
-        let _ = state.add_balance(validator_addr, Amount::from_raw(self_share));
-    }
-
-    // Delegator shares
-    let mut distributed = self_share;
-    for delegation in &staking.delegations {
-        let share = delegation
-            .amount
-            .raw()
-            .saturating_mul(stakers_pool)
-            .checked_div(total_stake)
-            .unwrap_or(0);
-        if share == 0 {
-            continue;
-        }
-        let _ = state.add_balance(&delegation.delegator, Amount::from_raw(share));
-        distributed = distributed.saturating_add(share);
-    }
-
-    // Rounding dust back to the validator (avoids lost VTT in edge cases)
-    if distributed < stakers_pool {
-        let dust = stakers_pool - distributed;
-        let _ = state.add_balance(validator_addr, Amount::from_raw(dust));
-    }
-}

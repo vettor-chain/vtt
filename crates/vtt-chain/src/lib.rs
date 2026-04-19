@@ -362,8 +362,35 @@ impl Chain {
         Ok(block_hash)
     }
 
+    /// Import a block we produced ourselves, reusing the receipts computed
+    /// during production. The caller must have already applied all state
+    /// mutations (tx execution, governance, rewards, gas fees) to
+    /// `self.state` before calling this — we only verify `state_root`
+    /// against current state and persist the block + provided receipts.
+    ///
+    /// This exists because `import_block` unconditionally re-executes
+    /// transactions. For a block we just produced the state is already
+    /// mutated (nonces incremented, balances debited) so re-execution
+    /// would trip the nonce check on every tx and write garbage
+    /// `fail_receipt` entries over the real ones.
+    pub fn import_produced_block(
+        &mut self,
+        block: Block,
+        receipts: Vec<TransactionReceipt>,
+    ) -> Result<ImportResult> {
+        self.import_block_impl(block, Some(receipts))
+    }
+
     /// Import a new block into the chain.
     pub fn import_block(&mut self, block: Block) -> Result<ImportResult> {
+        self.import_block_impl(block, None)
+    }
+
+    fn import_block_impl(
+        &mut self,
+        block: Block,
+        provided_receipts: Option<Vec<TransactionReceipt>>,
+    ) -> Result<ImportResult> {
         let block_hash = blake3_hash(&block.header.signable_bytes());
 
         // 1. Check for duplicates
@@ -452,6 +479,11 @@ impl Chain {
         // the state_root check — corrupting state for the next import.
         let block_snapshot = self.state.snapshot();
         let validator_set_snapshot = self.validator_set.clone();
+        // Capture pre-epoch total stake for the inflation formula. The
+        // reward calculation must use the validator-set snapshot from
+        // BEFORE any epoch rotation this block may trigger, otherwise
+        // peers and producers would disagree on an epoch-transition block.
+        let pre_epoch_total_staked = self.validator_set.total_stake();
 
         // 4. Check for epoch transition and update validator set
         let block_epoch = self.consensus.epoch_for_block(block.header.number);
@@ -579,16 +611,44 @@ impl Chain {
             let _ = slots_per_epoch;
         }
 
-        // 6. Execute transactions with block context from header
-        let (receipts, _total_gas) = execute_block_transactions_at(
-            &mut self.state,
-            &block.transactions,
-            &self.gas_config,
-            block.header.gas_limit,
-            block.header.number,
-            block.header.timestamp,
-            block.header.chain_id,
-        );
+        // 6. Execute transactions with block context from header, unless the
+        // caller supplied pre-computed receipts (self-produced block path:
+        // state was already mutated during production, so re-executing would
+        // trip the nonce check on every tx).
+        let self_produced = provided_receipts.is_some();
+        let receipts = match provided_receipts {
+            Some(r) => r,
+            None => {
+                let (r, _total_gas) = execute_block_transactions_at(
+                    &mut self.state,
+                    &block.transactions,
+                    &self.gas_config,
+                    block.header.gas_limit,
+                    block.header.number,
+                    block.header.timestamp,
+                    block.header.chain_id,
+                );
+                r
+            }
+        };
+
+        // 6b. Apply governance + block reward + gas-fee settlement. The
+        // producer has already applied these to state before handing us
+        // the block (they had to, to compute state_root), so we only run
+        // settlement when importing a peer-produced block. Running it
+        // twice on a self-produced block would double-mint.
+        if !self_produced {
+            let gas_used = block.header.gas_used;
+            let _summary = vtt_executor::apply_block_rewards_and_governance(
+                &mut self.state,
+                block.header.number,
+                gas_used,
+                &self.gas_config,
+                &block.header.validator,
+                pre_epoch_total_staked,
+                self.consensus.params(),
+            );
+        }
 
         // 7. Verify state root. Any mismatch reverts every mutation this
         // import made (epoch slashing, double-sign slash, missed slots,
@@ -903,8 +963,26 @@ mod tests {
         number: BlockNumber,
         validator: Address,
     ) -> Block {
-        // Execute no transactions, just compute new state root
+        // Compute the post-settlement state_root so import_block (which now
+        // applies rewards + governance + gas-fee split inside the import
+        // path) ends up with the same root we put in the header. Use
+        // snapshot/restore so we don't actually mutate state here — the real
+        // mutation happens when import_block runs.
+        let gas_config = chain.gas_config().clone();
+        let params = chain.consensus().params().clone();
+        let total_staked = chain.validator_set().total_stake();
+        let snapshot = chain.state().snapshot();
+        vtt_executor::apply_block_rewards_and_governance(
+            chain.state_mut(),
+            number,
+            0,
+            &gas_config,
+            &validator,
+            total_staked,
+            &params,
+        );
         let state_root = chain.state_mut().compute_state_root();
+        chain.state_mut().restore(snapshot);
 
         Block::new(
             BlockHeader {

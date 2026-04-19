@@ -92,6 +92,11 @@ pub struct StateDB {
     epoch_length: u64,
     /// Whether the DEX is paused (governance action can toggle this).
     dex_paused: bool,
+    /// Cumulative VTT minted (block rewards), in milli-VTT (raw / 10^15).
+    /// Persisted in ChainMeta so every node computes the same inflation.
+    total_minted_milli: u64,
+    /// Cumulative VTT burned (gas fees), in milli-VTT (raw / 10^15).
+    total_burned_milli: u64,
     /// The underlying trie for computing state roots.
     trie: StateTrie,
     /// Tracks which accounts have been modified.
@@ -128,6 +133,8 @@ impl StateDB {
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
+            total_minted_milli: 0,
+            total_burned_milli: 0,
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -160,6 +167,8 @@ impl StateDB {
             treasury_address: Address::ZERO,
             epoch_length: 1200,
             dex_paused: false,
+            total_minted_milli: 0,
+            total_burned_milli: 0,
             trie: StateTrie::new(),
             dirty: Vec::new(),
             dirty_assets: Vec::new(),
@@ -871,6 +880,41 @@ impl StateDB {
         self.dex_paused = paused;
     }
 
+    /// Cumulative VTT ever minted (block rewards), in milli-VTT.
+    pub fn total_minted_milli(&self) -> u64 {
+        self.total_minted_milli
+    }
+
+    /// Cumulative VTT ever burned (gas fees), in milli-VTT.
+    pub fn total_burned_milli(&self) -> u64 {
+        self.total_burned_milli
+    }
+
+    /// Record newly minted VTT (block reward). Persisted so every node
+    /// converges on the same circulating-supply figure for inflation.
+    pub fn record_mint_milli(&mut self, milli: u64) {
+        self.total_minted_milli = self.total_minted_milli.saturating_add(milli);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"supply:minted_milli",
+                &self.total_minted_milli.to_le_bytes(),
+            );
+        }
+    }
+
+    /// Record burned VTT (gas fees). Persisted for the same reason as mint.
+    pub fn record_burn_milli(&mut self, milli: u64) {
+        self.total_burned_milli = self.total_burned_milli.saturating_add(milli);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"supply:burned_milli",
+                &self.total_burned_milli.to_le_bytes(),
+            );
+        }
+    }
+
     /// Check whether the bridge is paused.
     pub fn is_bridge_paused(&self) -> bool {
         if let Some(ref storage) = self.storage {
@@ -1575,6 +1619,20 @@ impl StateDB {
                 self.stakers = items.into_iter().collect();
             }
         }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"supply:minted_milli") {
+            if bytes.len() == 8 {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                self.total_minted_milli = u64::from_le_bytes(arr);
+            }
+        }
+        if let Ok(Some(bytes)) = storage.get(Column::ChainMeta, b"supply:burned_milli") {
+            if bytes.len() == 8 {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&bytes);
+                self.total_burned_milli = u64::from_le_bytes(arr);
+            }
+        }
         // Re-hydrate the per-asset holder count index.
         if let Ok(entries) = storage.prefix_scan(Column::ChainMeta, b"holders:") {
             for (key, value) in entries {
@@ -2173,6 +2231,8 @@ impl StateDB {
             slashing_seen: self.slashing_seen.clone(),
             kyc_approved: self.kyc_approved.clone(),
             stakers: self.stakers.clone(),
+            total_minted_milli: self.total_minted_milli,
+            total_burned_milli: self.total_burned_milli,
         }
     }
 
@@ -2222,6 +2282,20 @@ impl StateDB {
         self.slashing_seen = snapshot.slashing_seen;
         self.kyc_approved = snapshot.kyc_approved;
         self.stakers = snapshot.stakers;
+        self.total_minted_milli = snapshot.total_minted_milli;
+        self.total_burned_milli = snapshot.total_burned_milli;
+        if let Some(ref storage) = self.storage {
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"supply:minted_milli",
+                &self.total_minted_milli.to_le_bytes(),
+            );
+            let _ = storage.put(
+                Column::ChainMeta,
+                b"supply:burned_milli",
+                &self.total_burned_milli.to_le_bytes(),
+            );
+        }
 
         // Re-persist the restored cache so storage matches in-memory state.
         // Without this, a mid-tx write that was rolled back would still be
@@ -2351,6 +2425,8 @@ pub struct StateSnapshot {
     slashing_seen: HashSet<(Address, u64, u32)>,
     kyc_approved: HashSet<Address>,
     stakers: HashSet<Address>,
+    total_minted_milli: u64,
+    total_burned_milli: u64,
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use vtt_chain::Chain;
 use vtt_consensus::ConsensusEngine;
 use vtt_crypto::{blake3_hash, merkle_root, Keypair};
-use vtt_executor::execute_block_transactions;
+use vtt_executor::{apply_block_rewards_and_governance, execute_block_transactions};
 
 use vtt_primitives::amount::Amount;
 use vtt_primitives::block::{Block, BlockHeader};
@@ -95,7 +95,22 @@ fn full_chain_lifecycle() {
     );
     assert!(receipts[0].success);
 
+    // Apply the same post-execution settlement import_block will run, so the
+    // header's state_root matches the imported state.
+    let settlement_params = chain.consensus().params().clone();
+    let total_staked = chain.validator_set().total_stake();
+    let settle_snapshot = chain.state().snapshot();
+    apply_block_rewards_and_governance(
+        chain.state_mut(),
+        1,
+        gas_used,
+        &gas_config,
+        &val_addr,
+        total_staked,
+        &settlement_params,
+    );
     let state_root = chain.state_mut().compute_state_root();
+    chain.state_mut().restore(settle_snapshot);
     let tx_root = merkle_root(&[blake3_hash(&tx.payload_bytes())]);
     let parent_hash = blake3_hash(&chain.get_block(&gen_hash).unwrap().header.signable_bytes());
 
