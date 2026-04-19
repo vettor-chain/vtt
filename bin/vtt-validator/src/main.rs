@@ -962,4 +962,3 @@ fn try_produce_block(
         }
     }
 }
-

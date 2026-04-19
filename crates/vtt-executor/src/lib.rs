@@ -2973,16 +2973,16 @@ pub fn apply_block_rewards_and_governance(
     total_staked: Amount,
     consensus_params: &ConsensusParams,
 ) -> BlockSettlementSummary {
-    let mut summary = BlockSettlementSummary::default();
-
     // Governance: auto-finalize at the end of each voting period, then
     // run any proposal whose timelock has expired. The order matches
     // vtt-validator::try_produce_block's pre-refactor behavior so the
     // state_root stays byte-identical to what we produced before the
     // consolidation.
-    summary.governance_finalized =
-        finalize_governance_proposals(state, block_number, total_staked);
-    summary.governance_executed = execute_queued_proposals(state, block_number);
+    let mut summary = BlockSettlementSummary {
+        governance_finalized: finalize_governance_proposals(state, block_number, total_staked),
+        governance_executed: execute_queued_proposals(state, block_number),
+        ..Default::default()
+    };
 
     // Block reward — inflation-based, 80% producer / 20% treasury.
     let treasury_addr = consensus_params.treasury_address;
@@ -2990,10 +2990,8 @@ pub fn apply_block_rewards_and_governance(
 
     let milli_to_raw = 10u128.pow(15);
     let initial_supply = Amount::from_vtt(INITIAL_SUPPLY_VTT);
-    let minted_so_far =
-        Amount::from_raw(state.total_minted_milli() as u128 * milli_to_raw);
-    let burned_so_far =
-        Amount::from_raw(state.total_burned_milli() as u128 * milli_to_raw);
+    let minted_so_far = Amount::from_raw(state.total_minted_milli() as u128 * milli_to_raw);
+    let burned_so_far = Amount::from_raw(state.total_burned_milli() as u128 * milli_to_raw);
     let total_supply = Amount::from_raw(
         initial_supply
             .raw()
@@ -3024,8 +3022,7 @@ pub fn apply_block_rewards_and_governance(
     }
 
     // Gas fees — 70% burned, 30% to producer (commission-aware).
-    let total_gas_fees =
-        Amount::from_raw(gas_used as u128 * gas_config.min_gas_price.raw());
+    let total_gas_fees = Amount::from_raw(gas_used as u128 * gas_config.min_gas_price.raw());
     if total_gas_fees.raw() > 0 {
         let gas_split = split_gas_fees(total_gas_fees);
         distribute_producer_reward(state, producer, gas_split.producer);
